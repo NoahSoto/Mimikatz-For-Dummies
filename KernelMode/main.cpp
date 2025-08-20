@@ -1,9 +1,34 @@
 #include <ntifs.h>
 #include <ntddk.h>
 
-
+//////////////////////////////////////////////////////////////////////////////////
 //We need to start by getting undocumented functions 
 //:57
+
+//0x1 bytes (sizeof)
+//https://www.vergiliusproject.com/kernels/x86/windows-8.1/rtm/_PS_PROTECTION
+
+typedef struct _PS_PROTECTION //offset = 0x87a from EPROCESS according to vergiliusproject
+//confirmed this in windbg with dt _eprocess ->
+//   +0x87a Protection       : _PS_PROTECTION
+{
+	UCHAR Type : 3; //protected
+	UCHAR Audit : 1; //audit / not protected
+	UCHAR Signer : 4; //who signed the image
+	//example: 0x00 = unprotected.
+} PS_PROTECTION, * PPS_PROTECTION;
+
+typedef struct _PROCESS_PROTECTION_INFO
+{
+	UCHAR SignatureLevel;
+	UCHAR SectionSignatureLevel;
+	PS_PROTECTION Protection; // previously defined struct
+} PROCESS_PROTECTION_INFO, * PPROCESS_PROTECTION_INFO;
+
+
+
+//////////////////////////////////////////////////////////////////////////////////
+
 extern "C" { //run some C in cpp
 
 	//Forward declare functions that allow us to call undcoumented funcitnos similar to what we'd do w pointers to functions in C.
@@ -25,6 +50,8 @@ void debug_printer(PCSTR text) {
 #ifndef DEBUG
 	UNREFERENCED_PARAMETER(text);
 #endif //debug
+
+	//KdPrint(Ex) only prints in compiled debug mode jsyk.
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, text));
 }
 
@@ -43,6 +70,12 @@ namespace driver {
 		constexpr ULONG read = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x697, METHOD_BUFFERED, FILE_SPECIAL_ACCESS); //read process mem
 
 		constexpr ULONG write = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x698, METHOD_BUFFERED, FILE_SPECIAL_ACCESS); //write process mem.
+
+		constexpr ULONG getProtection = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x699, METHOD_BUFFERED, FILE_SPECIAL_ACCESS); //write process mem.
+
+		constexpr ULONG unprotect = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x700, METHOD_BUFFERED, FILE_SPECIAL_ACCESS); //write process mem.
+
+		constexpr ULONG protect = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x701, METHOD_BUFFERED, FILE_SPECIAL_ACCESS); //write process mem.
 
 	}
 
@@ -74,7 +107,6 @@ namespace driver {
 		
 		debug_printer("Device Control Called...\n");
 
-		
 		NTSTATUS status = STATUS_UNSUCCESSFUL;
 
 		//get stack location of IRP to find which code is being passed.
@@ -84,25 +116,22 @@ namespace driver {
 
 		auto request = reinterpret_cast<Request*>(irp->AssociatedIrp.SystemBuffer);
 
-
-
-
 		if (request == nullptr || stack_IRP == nullptr) {
 			IoCompleteRequest(irp, IO_NO_INCREMENT); //every time we complete an IRP / complete incoming packet request, we must call this.
 			return status;
 		}
 
-		static PEPROCESS target_process = nullptr; //this is static and survives after the fucntions been run
-		
+		static PEPROCESS target_process = nullptr; //this is static and survives after the fucntions been run so we can attach once, and use the same PEPROCESS object later.
+		static PROCESS_PROTECTION_INFO* psProtection = nullptr;
 		const ULONG control_code = stack_IRP->Parameters.DeviceIoControl.IoControlCode;
 
 		switch(control_code) {
 			case codes::attach:
 				status = PsLookupProcessByProcessId(request->hPID, &target_process);
+				psProtection = (PROCESS_PROTECTION_INFO*)(((ULONG_PTR)target_process) + 0x87a);
 				break;
 			case codes::read:
 				//we need to have a target process before we cna read proc mem
-
 				if (target_process != nullptr) {
 					status = MmCopyVirtualMemory(target_process, request->pTargetMemory, PsGetCurrentProcess(), request->pBuffer, //copy memory from target -> driver
 						request->sSize, KernelMode, &request->sReturn_size);
@@ -113,12 +142,44 @@ namespace driver {
 				}
 				break;
 			case codes::write:
-
+				
 				if (target_process != nullptr) {
 					status = MmCopyVirtualMemory(PsGetCurrentProcess(), request->pBuffer, target_process, request->pTargetMemory, //copy memory from target -> driver
 						request->sSize, KernelMode, &request->sReturn_size);
 				}
 				break;
+			case codes::getProtection:
+				if (target_process != nullptr && psProtection != nullptr) {
+					if (!psProtection) {
+						debug_printer("Error retrieving protection from EPROCESS struct, check your offsets?\n");
+					}
+					debug_printer("Recieved protection level of target process through kernel land access to memory...\n");
+				}
+				break;
+			case codes::unprotect:
+				if (target_process != nullptr && psProtection != nullptr) {
+					psProtection->SignatureLevel = 0;
+					psProtection->SectionSignatureLevel = 0;
+					psProtection->Protection.Type = 0; // accessing Type from the PS_PROTECTION struct
+					psProtection->Protection.Signer = 0; // same thing with Signer
+					debug_printer("Removed signature and protection...\n");
+					status = STATUS_SUCCESS;
+
+				}
+				break;
+
+			case codes::protect:
+				if (target_process != nullptr && psProtection != nullptr) {
+					psProtection->Protection.Type = 1;
+					status = STATUS_SUCCESS;
+					debug_printer("Added protection levels back...\n");
+				}
+				break;
+
+				//We will be accessing fields within the EPROCESS field of a process via offsets.  
+				//PsLookupProcessByProcessId returns a base pointer to the EPROCESS struct of a given process.  Adding onto this
+				//Can help us find the EPROC
+
 			default:
 				break;
 
