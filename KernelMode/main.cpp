@@ -1,6 +1,6 @@
 #include <ntifs.h>
 #include <ntddk.h>
-
+#include <wdm.h>
 //////////////////////////////////////////////////////////////////////////////////
 //We need to start by getting undocumented functions 
 //:57
@@ -32,14 +32,14 @@ typedef struct _PROCESS_PROTECTION_INFO
 extern "C" { //run some C in cpp
 
 	//Forward declare functions that allow us to call undcoumented funcitnos similar to what we'd do w pointers to functions in C.
-	
+
 	//The IoCreateDriver function is part of the ntoskrnl.exe (Windows NT Operating System Kernel) 
 	//rather than a DLL. It is a kernel-mode function provided by the Windows kernel itself.
 
 	//Make this IOCTL driver compatible w kdmapper.
 	//Create a driver manually accepting a driver name and a driver entry point/init function.
 	NTKERNELAPI NTSTATUS IoCreateDriver(PUNICODE_STRING DriverName, PDRIVER_INITIALIZE InitializationFunction);
-	
+
 	//read/write process memory from within a dirver.
 	NTKERNELAPI NTSTATUS MmCopyVirtualMemory(PEPROCESS SourceProcess, PVOID SourceAddress, PEPROCESS TargetProcess, PVOID TargetAddress, SIZE_T BufferSize, KPROCESSOR_MODE PreviousMode, PSIZE_T ReturnSize);
 }
@@ -62,7 +62,7 @@ namespace driver {
 		//UserMode applications call DeviceIoControl to send a struct -> drivers.
 		//Then we recieve the struct and do whatever we want with it.
 
-		
+
 		//Must be buffered IO so we can send buffers between kernel and userland.
 
 		constexpr ULONG attach = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x696, METHOD_BUFFERED, FILE_SPECIAL_ACCESS); //setup the driver
@@ -102,9 +102,9 @@ namespace driver {
 
 	//everytime we call DeviceIoControl (send stuff to kernel) this is called.  This is where read/write/attach comes in.
 	NTSTATUS device_control(PDEVICE_OBJECT pDeviceObject, PIRP irp) { 		//irp is the packet that carries the data between ICTL devices.
-		
+
 		UNREFERENCED_PARAMETER(pDeviceObject);
-		
+
 		debug_printer("Device Control Called...\n");
 
 		NTSTATUS status = STATUS_UNSUCCESSFUL;
@@ -125,63 +125,63 @@ namespace driver {
 		static PROCESS_PROTECTION_INFO* psProtection = nullptr;
 		const ULONG control_code = stack_IRP->Parameters.DeviceIoControl.IoControlCode;
 
-		switch(control_code) {
-			case codes::attach:
-				status = PsLookupProcessByProcessId(request->hPID, &target_process);
-				psProtection = (PROCESS_PROTECTION_INFO*)(((ULONG_PTR)target_process) + 0x87a);
+		switch (control_code) {
+		case codes::attach:
+			status = PsLookupProcessByProcessId(request->hPID, &target_process);
+			psProtection = (PROCESS_PROTECTION_INFO*)(((ULONG_PTR)target_process) + 0x87a);
+			break;
+		case codes::read:
+			//we need to have a target process before we cna read proc mem
+			if (target_process != nullptr) {
+				status = MmCopyVirtualMemory(target_process, request->pTargetMemory, PsGetCurrentProcess(), request->pBuffer, //copy memory from target -> driver
+					request->sSize, KernelMode, &request->sReturn_size);
+			}
+			else {
+				debug_printer("No target_process pointer when calling read IOCTL...\n");
 				break;
-			case codes::read:
-				//we need to have a target process before we cna read proc mem
-				if (target_process != nullptr) {
-					status = MmCopyVirtualMemory(target_process, request->pTargetMemory, PsGetCurrentProcess(), request->pBuffer, //copy memory from target -> driver
-						request->sSize, KernelMode, &request->sReturn_size);
-				}
-				else {
-					debug_printer("No target_process pointer when calling read IOCTL...\n");
-					break;
-				}
-				break;
-			case codes::write:
-				
-				if (target_process != nullptr) {
-					status = MmCopyVirtualMemory(PsGetCurrentProcess(), request->pBuffer, target_process, request->pTargetMemory, //copy memory from target -> driver
-						request->sSize, KernelMode, &request->sReturn_size);
-				}
-				break;
-			case codes::getProtection:
-				if (target_process != nullptr && psProtection != nullptr) {
-					if (!psProtection) {
-						debug_printer("Error retrieving protection from EPROCESS struct, check your offsets?\n");
-					}
-					debug_printer("Recieved protection level of target process through kernel land access to memory...\n");
-				}
-				break;
-			case codes::unprotect:
-				if (target_process != nullptr && psProtection != nullptr) {
-					psProtection->SignatureLevel = 0;
-					psProtection->SectionSignatureLevel = 0;
-					psProtection->Protection.Type = 0; // accessing Type from the PS_PROTECTION struct
-					psProtection->Protection.Signer = 0; // same thing with Signer
-					debug_printer("Removed signature and protection...\n");
-					status = STATUS_SUCCESS;
+			}
+			break;
+		case codes::write:
 
+			if (target_process != nullptr) {
+				status = MmCopyVirtualMemory(PsGetCurrentProcess(), request->pBuffer, target_process, request->pTargetMemory, //copy memory from target -> driver
+					request->sSize, KernelMode, &request->sReturn_size);
+			}
+			break;
+		case codes::getProtection:
+			if (target_process != nullptr && psProtection != nullptr) {
+				if (!psProtection) {
+					debug_printer("Error retrieving protection from EPROCESS struct, check your offsets?\n");
 				}
-				break;
+				debug_printer("Recieved protection level of target process through kernel land access to memory...\n");
+			}
+			break;
+		case codes::unprotect:
+			if (target_process != nullptr && psProtection != nullptr) {
+				psProtection->SignatureLevel = 0;
+				psProtection->SectionSignatureLevel = 0;
+				psProtection->Protection.Type = 0; // accessing Type from the PS_PROTECTION struct
+				psProtection->Protection.Signer = 0; // same thing with Signer
+				debug_printer("Removed signature and protection...\n");
+				status = STATUS_SUCCESS;
 
-			case codes::protect:
-				if (target_process != nullptr && psProtection != nullptr) {
-					psProtection->Protection.Type = 1;
-					status = STATUS_SUCCESS;
-					debug_printer("Added protection levels back...\n");
-				}
-				break;
+			}
+			break;
 
-				//We will be accessing fields within the EPROCESS field of a process via offsets.  
-				//PsLookupProcessByProcessId returns a base pointer to the EPROCESS struct of a given process.  Adding onto this
-				//Can help us find the EPROC
+		case codes::protect:
+			if (target_process != nullptr && psProtection != nullptr) {
+				psProtection->Protection.Type = 1;
+				status = STATUS_SUCCESS;
+				debug_printer("Added protection levels back...\n");
+			}
+			break;
 
-			default:
-				break;
+			//We will be accessing fields within the EPROCESS field of a process via offsets.  
+			//PsLookupProcessByProcessId returns a base pointer to the EPROCESS struct of a given process.  Adding onto this
+			//Can help us find the EPROC
+
+		default:
+			break;
 
 		}
 
@@ -194,7 +194,7 @@ namespace driver {
 }
 
 
-NTSTATUS DriverMain(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath){
+NTSTATUS DriverMain(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) {
 
 	//Because kdmapper is trying to load our kernel without 'windows knowing' or through traditional means, we need IoCreateDriver because that creates the DriverObject and registry path for us, it makes everythign fall back into alignment w how things wouold be done traditionally.
 
@@ -210,7 +210,7 @@ NTSTATUS DriverMain(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath){
 
 	PDEVICE_OBJECT pDeviceObject = nullptr;//populates w pointer after IoCreateDevice
 
-	NTSTATUS status = IoCreateDevice(DriverObject, 0,&uDeviceName, FILE_DEVICE_UNKNOWN, FILE_DEVICE_SECURE_OPEN, FALSE, &pDeviceObject);
+	NTSTATUS status = IoCreateDevice(DriverObject, 0, &uDeviceName, FILE_DEVICE_UNKNOWN, FILE_DEVICE_SECURE_OPEN, FALSE, &pDeviceObject);
 
 
 	if (status != STATUS_SUCCESS) {
@@ -243,7 +243,7 @@ NTSTATUS DriverMain(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath){
 	DriverObject->MajorFunction[IRP_MJ_CREATE] = driver::create; //When a call is made to the driver it looks to these functions on what to do.
 	DriverObject->MajorFunction[IRP_MJ_CLOSE] = driver::close; //When a call is made to the driver it looks to these functions on what to do.
 	DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = driver::device_control; //When a call is made to the driver it looks to these functions on what to do.
-	
+
 	ClearFlag(pDeviceObject->Flags, DO_DEVICE_INITIALIZING);//clearing this means we are now intiialized.
 
 	debug_printer("Driver device initialized...\n");
@@ -260,8 +260,8 @@ NTSTATUS DriverEntry() {
 	UNICODE_STRING uDriverName = {};
 
 	//Name must be \\Driver\\<WHATEVER>
-	RtlInitUnicodeString(&uDriverName, L"\\Driver\\noah"); 
+	RtlInitUnicodeString(&uDriverName, L"\\Driver\\noah");
 
 
-	return IoCreateDriver(&uDriverName,DriverMain); //We call create driver which is
+	return IoCreateDriver(&uDriverName, DriverMain); //We call create driver which is
 }
