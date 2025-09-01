@@ -9,6 +9,7 @@
 #include <bcrypt.h>
 
 
+
 // forward declarations
 typedef struct _KIWI_MSV1_0_LIST_63 KIWI_MSV1_0_LIST_63;
 typedef struct _KIWI_MSV1_0_CREDENTIALS KIWI_MSV1_0_CREDENTIALS;
@@ -114,6 +115,13 @@ typedef struct _KIWI_BCRYPT_HANDLE_KEY {
     PVOID unk0;
 } KIWI_BCRYPT_HANDLE_KEY, * PKIWI_BCRYPT_HANDLE_KEY;
 
-
+typedef struct _SECURITY_BLOB {
+    BYTE LMHash[16];           // 0x00
+    BYTE NTHash[16];           // 0x10
+    BYTE IV[16];               // 0x20, optional AES IV
+    BYTE reserved[0x190];      // padding / metadata up to 0x1B0
+    WCHAR Username[64];        // UTF-16, starts around 0x1B0
+    WCHAR Domain[64];          // UTF-16, optional
+} SECURITY_BLOB, * PSECURITY_BLOB;
 
 #endif // MIMIKATZ_HEADERS_H
