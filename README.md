@@ -11,7 +11,7 @@ If you already feel comfortable in these topics then I highly recommend checking
 
 # Protections
 
-Before we get into writing code to exploit lsass, we first need to understand what we're up against. Tackling [Credential Guard]([How Credential Guard works | Microsoft Learn](https://learn.microsoft.com/en-us/windows/security/identity-protection/credential-guard/how-it-works)) will be done in another project, for now I'm focusing on simply dealing with LSA Protection.  I do however highly recommend reading up on Credential Guard, and how it may impact you.
+Before we get into writing code to exploit lsass, we first need to understand what we're up against. Tackling [Credential Guard](https://learn.microsoft.com/en-us/windows/security/identity-protection/credential-guard/how-it-works) will be done in another project, for now I'm focusing on simply dealing with LSA Protection.  I do however highly recommend reading up on Credential Guard, and how it may impact you.
 
 ## LSA Protection
 
