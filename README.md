@@ -1,4 +1,4 @@
-# Mimikatz for Dummies 
+# Mimikatz for Dummies - How does Mimikatz Work?
 
 I want to shoutout these resources and researchers that made this project possible:
 *  [Maldev Academy](https://maldevacademy.com/)
