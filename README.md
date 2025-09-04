@@ -8,7 +8,7 @@ I want to shoutout these resources and researchers that made this project possib
 
 I've wanted to make a project like this for a while (12/24/2023 to be exact, wow time really flies) so I'm very grateful for their knowledge and the time and effort they put into their writeups
 
-![discord](attachments/Pasted\ image\ 20250903225256.png)
+![discord](attachments/Pasted%20image%2020250903225256.png)
 
 Shoutout to [Soups71 (Soups)](https://github.com/soups71) for listening to my incessant progress updates and bouncing ideas around with me.
 
