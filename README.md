@@ -19,7 +19,7 @@ If you already feel comfortable in these topics then I highly recommend checking
 My setup very closely follows that described in [YOUR FIRST KERNEL DRIVER (FULL GUIDE)](https://www.youtube.com/watch?v=n463QJ4cjsU&t=4319s).  If you would like help setting up a VM that you can kernel debug from your Windows host, this video is my recommendation.
 # Protections
 
-Before we get into writing code to exploit lsass, we first need to understand what we're up against. Tackling ![Credential Guard](https://learn.microsoft.com/en-us/windows/security/identity-protection/credential-guard/how-it-works) will be done in another project, for now I'm focusing on simply dealing with LSA Protection AND LSASS encryption.  I do however highly recommend reading up on Credential Guard, and how it may impact you.
+Before we get into writing code to exploit lsass, we first need to understand what we're up against. Tackling [Credential Guard](https://learn.microsoft.com/en-us/windows/security/identity-protection/credential-guard/how-it-works) will be done in another project, for now I'm focusing on simply dealing with LSA Protection AND LSASS encryption.  I do however highly recommend reading up on Credential Guard, and how it may impact you.
 
 ## LSA Protection
 
