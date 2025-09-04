@@ -1,3 +1,4 @@
+# Mimikatz for Dummies
 
 Before getting into this article I want to shoutout these resources particular that made this project possible:
 *  [Maldev Academy](https://maldevacademy.com/)
@@ -8,9 +9,6 @@ These resources really have helped lay the foundation for my knowledge in malwar
 
 If you already feel comfortable in these topics then I highly recommend checking out the resources above.  If you have some experience dabbling in the Windows API and have always been curious how Mimikatz works, but dont really know where to start, then give this article a read!
 
-# Setup
-
-blah
 # Protections
 
 Before we get into writing code to exploit lsass, we first need to understand what we're up against. Tackling [Credential Guard]([How Credential Guard works | Microsoft Learn](https://learn.microsoft.com/en-us/windows/security/identity-protection/credential-guard/how-it-works)) will be done in another project, for now I'm focusing on simply dealing with LSA Protection.  I do however highly recommend reading up on Credential Guard, and how it may impact you.
