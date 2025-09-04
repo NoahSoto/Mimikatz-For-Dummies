@@ -66,11 +66,11 @@ We can view active processes in Windgb which is going to walk through the `PsAct
 
 So we can see what that looks like:
 
-![[Pasted image 20250901185437.png]]
+![process](attachments/Pasted%20image%2020250901185437.png)
 
 Or if we want a specific process:
 
-![[Pasted image 20250901185546.png]]
+![specific process](attachments/Pasted%20image%2020250901185546.png)
 
 The `PROCESS` string is a pointer to the `EPROCESS` structure in kernel memory.  To display contents of a variable in Windbg, we use `dt` ([display type]([dt (Display Type) - Windows drivers | Microsoft Learn](https://learn.microsoft.com/en-us/windows-hardware/drivers/debuggercmds/dt--display-type-)))
 
@@ -82,12 +82,12 @@ dt nt!_EPROCESS [ADDRESS] (When you know the address of a strcut you can interpr
 ```
 
 
-![[Pasted image 20250901185907.png]]
+![EPROCESS](attachments/Pasted%20image%2020250901185907.png)
 
 Here we see the `EPROCESS` struct being pulled from `nt` or [`ntoskrnl`](https://malwaretips.com/blogs/ntoskrnl-exe-what-is-ntoskrnl-exe-should-i-remove-it/).  While Windbg shows us what we need and makes it easier once we're in our program, sometimes research is best done online through sites like [vergiliusproject.com](https://www.vergiliusproject.com/kernels/x64/windows-11/21h2/_EPROCESS) or sites similar that contain online databases of Windows structures.
 
 
-![[Pasted image 20250901190227.png]]
+![eprocessStruct](Pasted%20image%2020250901190227.png)
 
 
 Here we can see that its of type [`PS_PROTECTION`.](https://www.vergiliusproject.com/kernels/x64/windows-11/21h2/_PS_PROTECTION).
@@ -116,19 +116,19 @@ Type = 3 [Protected]
 
 You can view your processes protection level simply by clicking the Windbg link for `Protection`
 
-![[Pasted image 20250901191343.png]]
+![protection](attachments/Pasted%20image%2020250901191343.png)
 
 Or can you try and pull it manually like this:
 
 ```
 dt nt!_PS_PROTECTION ffffa886aba20080+0x87a
 ```
-![[Pasted image 20250901191454.png]]
-![[Pasted image 20250901191849.png]]
+![protectionLevels](Pasted%20image%2020250901191454.png)
+![protOffset](Pasted%20image%2020250901191849.png)
 
 So if we patch this to zero, our process the target process is unprotected, and our usermode land application can retrieve a file handle and perform read and write operations to its memory address space.  One crucial piece of information that I've left out till now is that**you cant actually read or write to these memory addresses without a kernel driver.**  They live in the kernel's memory address space, not in userland.
 
-![[Pasted image 20250901192321.png]]
+![kernelland](Pasted%20image%2020250901192321.png)
 
 If we write a driver however, and find a way to load it without a signature, then we can unprotect processes at will, and read and write to kernel memory. 
 ### Driver Protections
@@ -883,7 +883,7 @@ Once again taking inspiration from Mimikatz is something I encourage!
 You may want to save this link: [mimikatz/mimikatz/modules/sekurlsa/kuhl_m_sekurlsa_utils.c at master · gentilkiwi/mimikatz](https://github.com/gentilkiwi/mimikatz/blob/master/mimikatz/modules/sekurlsa/kuhl_m_sekurlsa_utils.c)
 
 
-![[Pasted image 20250902212303.png]]
+![patterkKeys](Pasted%20image%20020250902212303.png)
 
 Here we see mimikatz defining a pattern to search within the lsasrv memory space, with slight variations in the matter depending on which build of Windows the victim machine is running.  Once mimikatz has the address of where this pattern matches, its possible to retrieve the `LogonSessionList`pointer.
 
@@ -895,7 +895,7 @@ First we need to attach to the lsass prospect, and find where lsasrv.dll's base 
 !process 0 0 lsass.exe  # dump EPROCESS info briefly for lsass.exe>
 ```
 
-![[Pasted image 20250902212823.png]]
+![windbgAgain](Pasted%20image%2020250902212823.png)
 
 Now we use the EPROCESS pointer and supply it to the `.process` command which changes the context of Windgb to that of the process.  Essentially it tells the debugger to pretend as if it's inside of your target process, thus allowing you to better interact with the memory addresses for that process.
 
@@ -904,21 +904,21 @@ Now we use the EPROCESS pointer and supply it to the `.process` command which ch
 g
 ```
 
-![[Pasted image 20250902213151.png]]
+![irp](Pasted%20image%2020250902213151.png)
 
 After changing the context of your debugger, in my experience you do need to reload your symbols.
 
 ```
 .reload /user
 ```
-![[Pasted image 20250902213502.png]]
+![reload](Pasted%20image%2020250902213502.png)
 
 Now we should be able to search for the lsasrv module with the `lm` command which [lists modules](https://learn.microsoft.com/en-us/windows-hardware/drivers/debuggercmds/lm--list-loaded-modules-)that are loaded in memory by a process.  We specify a specific module with the `m` flag.
 
 ```
 lm m lsasrv
 ```
-![[Pasted image 20250902213640.png]]
+![lm](Pasted%20image%2020250902213640.png)
 
 Here we see the memory address range for the module!  Now we know exactly where our search will begin and where it will stop.
 
@@ -952,7 +952,7 @@ To search for any of the byte sequences above we use the `s` [command](https://l
 ```
 s -b 00007ffd`bd8d0000 00007ffd`bda7e000 33 ff 41 89 37 4c 8b f3 45 85 c0 74
 ```
-![[Pasted image 20250902214041.png]]
+![search](Pasted%20image%2020250902214041.png)
 
 And we get a hit!  Lets [unassemble](https://learn.microsoft.com/en-us/windows-hardware/drivers/debuggercmds/u--unassemble-) this bit of memory and see what kind of instructions are taking place there.  This provides an assembly translation at an address of our choosing.
 
@@ -960,7 +960,7 @@ And we get a hit!  Lets [unassemble](https://learn.microsoft.com/en-us/windows-h
 u 00007ffd`bd93e384
 ```
 
-![[Pasted image 20250902214235.png]]
+![u](Pasted%20image%2020250902214235.png)
 
 Perfect! We actually SEE the reference to LogonSessionList. Here the assembler is telling the computer to place the address of LogonSessionList inside of the rcx register.
 
@@ -980,7 +980,7 @@ Then our next address is 00007ffd`bd93e398 + 0x07 =
 ```
 
 
-![[Pasted image 20250902220710.png]]
+![address](Pasted%20image%2020250902220710.png)
 
 Hopefully that makes sense because now we need to implement this process in C!
 
@@ -1165,15 +1165,15 @@ pKeysBase = bytePatterns.pKeysPattern;
 
 Then from here we apply a `0x14` offset from the pattern match address that brings us back up to the `lea` instruction:
 
-![[Pasted image 20250902214235.png]]
-![[Pasted image 20250903191427.png]]
+![lea](Pasted%20image%2020250902214235.png)
+![lea2](Pasted%20image%2020250903191427.png)
 
 ```c
 
 PVOID pLslActual = (PVOID)((BYTE*)pLsl + 0x14); //offset to 00007ffd`fc17e398 488d0d915b1200  lea     rcx,[lsasrv!LogonSessionList (00007ffd`fc2a3f30)] lea instruction to retr address
 ```
 You can see the instruction in memory with each of the assembly instructions underlined in a different color, followed by the offset that we're looking for thaat will yield the LogonSessionList highlighted in yellow:
-![[Pasted image 20250903191652.png]]
+![instruction](Pasted%20image%2020250903191652.png)
 
 ```
 488d0d = Assembly bytes
@@ -1446,7 +1446,7 @@ UCHAR keyPattern[16] = { 0x83, 0x64, 0x24, 0x30, 0x00, 0x48, 0x8d, 0x45, 0xe0, 0
 ```
 Memory Search Hotkey = s 
 ```
-![[Pasted image 20250830220502.png]]
+![search](Pasted%20image%2020250830220502.png)
 
 Adam Chester was able to discover that `DAT_180195420` is relative offset to an AES handle. For clarity we can rename this to `hAESKeyHandle`.
 
@@ -1457,24 +1457,24 @@ R Click > References > Show References to hAESKeyHandle
 or 
 Cntrl + Shift + F 
 ```
-![[Pasted image 20250903211131.png]]
+![ref](Pasted%20image%2020250903211131.png)
 
 This shows us other times that the code calls or uses this object.  The first finding is of particular note as it clearly depicts BCrypt encryption routines
 
-![[Pasted image 20250903211311.png]]
+![find](Pasted%20image%2020250903211311.png)
 
-![[Pasted image 20250830220844.png]]
+![more](Pasted%20image%2020250830220844.png)
 
 Examining the inputs going into the Bcrypt function on the right lets us fill out a couple more labels until we eventually find the DES key handle offset, and algorithm handles as well.
 
-![[Pasted image 20250903211737.png]]
+![handle](Pasted%20image%2020250903211737.png)
 
 The blue box represents the address in memory that our pattern searching function is going to return.  We need to write code that takes us from the blue box, up to the red boxes.  Thankfully Mimikatz has helped out with this process as well!
 
 The pattern search address simply provides a reliable place within close range of both our handles, that we can then apply another offset to.
 
 [Mimkatz File](https://github.com/gentilkiwi/mimikatz/blob/152b208916c27d7d1fc32d10e64879721c4d06af/mimikatz/modules/sekurlsa/crypto/kuhl_m_sekurlsa_nt6.c#L9)
-![[Pasted image 20250903212639.png]]
+![mim](Pasted%20image%2020250903212639.png)
 These are build specific, just like the pattern bytes.  One hugely important misunderstanding I had when working through this is that **the offset listed above, takes you to a relative offset to the key.  This does NOT take you to the key itself!**
 
 Now all that's left is to retrieve these handles:
@@ -1484,7 +1484,6 @@ First we can make some definitions for the AES,DES, and IV offsets, and similar 
 #define IVOffset 67 //67
 #define AESKeyOffset 16//+16
 #define DESKeyOffset 89 //-89
-
 
 	int32_t hAesKeyOffset = 0; //what took me forever to realize is that this offset in mimikatz is not the KEY, its a relative offset to the KEY.
 	int32_t hDesKeyOffset = 0;
@@ -1545,7 +1544,7 @@ lea rdx, [rip + 0013bfef]
 -------------------------------------
 48 8d 15 [ ef bf 13 00 ] | [] = Where Mimikatz takes you
 ```
-![[Pasted image 20250903214604.png]]
+![asm](Pasted%20image%2020250903214604.png)
 
 And so we're adding 4 so that we just straight to the first index of the red box.  Keep in mind the endianness of whats written in the assembler versus the interpreted version, hence why it may look out of order at first glance.
 
@@ -1726,7 +1725,7 @@ Then we just need to decrypt the blob.
 
 Like we saw earlier, we know that BCrypt is the primary cryptograph driver of lsass's credentials stored in memory.  We even saw the different algorithms and BCrypt properties used by lsass in Ghidra.
 
-![[Pasted image 20250903221846.png]]
+![bcrypt](Pasted%20image%2020250903221846.png)
 
 Here's what we know based on the decomplication of lsasrv.dll
 
@@ -1772,7 +1771,7 @@ We need copies of the IV because when we start decrypting the blobs BCrypt will 
 
 [mimikatz/mimilib/sekurlsadbg/kuhl_m_sekurlsa_nt6.c at 152b208916c27d7d1fc32d10e64879721c4d06af · gentilkiwi/mimikatz](https://github.com/gentilkiwi/mimikatz/blob/152b208916c27d7d1fc32d10e64879721c4d06af/mimilib/sekurlsadbg/kuhl_m_sekurlsa_nt6.c#L9)
 
-![[Pasted image 20250903222257.png]]
+![mim2](Pasted%20image%2020250903222257.png)
 
 This code also clues us in on the fact that we should be making IV copies because of the changes BCrypt will make to the original, and if the blob size is divisible by 8, so without Adam Chester's article this is another way you could confirm this without needing to fully reverse lsasrv.dll.
 ```c
@@ -1867,15 +1866,15 @@ else {
 }
 ```
 
-![[Pasted image 20250903223038.png]]
+![decrypt](Pasted%20image%2020250903223038.png)
 
 For reference I do not have a password set on this machine.  Here you can see that an empty password field as an NT hash matches perfectly with the decrypted output above!
 
-![[Pasted image 20250903223133.png]]
+![fin1](Pasted%20image%2020250903223133.png)
 
-![[Pasted image 20250903224011.png]]
+![fin2](Pasted%20image%2020250903224011.png)
 
-![[Pasted image 20250903224003.png]]
+![fin3](Pasted%20image%2020250903224003.png)
 
 1. Create driver ✔️
 2. Load driver ✔️
@@ -1891,5 +1890,3 @@ For reference I do not have a password set on this machine.  Here you can see th
 
 So there you have it!  Pulling hashes and username from lsass!  Hopefully this was helpful!  I've wanted to make something like this for a while!
 
-
-)
