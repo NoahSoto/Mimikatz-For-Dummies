@@ -16,6 +16,8 @@ If you already feel comfortable in these topics then I highly recommend checking
 
 # Setup
 
+## Credential Guard
+
 My setup very closely follows that described in [YOUR FIRST KERNEL DRIVER (FULL GUIDE)](https://www.youtube.com/watch?v=n463QJ4cjsU&t=4319s).  If you would like help setting up a VM that you can kernel debug from your Windows host, this video is my recommendation.
 # Protections
 
