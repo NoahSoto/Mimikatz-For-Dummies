@@ -1,17 +1,24 @@
-# Mimikatz for Dummies
 
-Before getting into this article I want to shoutout these resources particular that made this project possible:
+I want to shoutout these resources and researchers that made this project possible:
 *  [Maldev Academy](https://maldevacademy.com/)
 * [Exploring Mimikatz - Part 1 - WDigest - XPN InfoSec Blog](https://blog.xpnsec.com/exploring-mimikatz-part-1/)
 * [Uncovering Mimikatz 'msv' and collecting credentials through PyKD :: — uf0](https://www.matteomalvica.com/blog/2020/01/20/mimikatz-lsass-dump-windg-pykd/)
 * [YOUR FIRST KERNEL DRIVER (FULL GUIDE)](https://www.youtube.com/watch?v=n463QJ4cjsU&t=4319s)
-These resources really have helped lay the foundation for my knowledge in malware development, the Windows API, are all well written articles that go over a lot of the same principles discussed here, and honestly they probably do it better.
 
-If you already feel comfortable in these topics then I highly recommend checking out the resources above.  If you have some experience dabbling in the Windows API and have always been curious how Mimikatz works, but dont really know where to start, then give this article a read!
+I've wanted to make a project like this for a while (12/24/2023 to be exact, wow time really flies) so I'm very grateful for their knowledge and the time and effort they put into their writeups
 
+![[Pasted image 20250903225256.png]]
+
+Shoutout to [Soups71 (Soups)](https://github.com/soups71) for listening to my incessant progress updates and bouncing ideas around with me.
+
+If you already feel comfortable in these topics then I highly recommend checking out the resources above.  If you have some experience dabbling in the Windows API and have always been curious how Mimikatz works, but dont really know where to start, then you are my target audience and I hope you gain something!
+
+# Setup
+
+My setup very closely follows that described in [YOUR FIRST KERNEL DRIVER (FULL GUIDE)](https://www.youtube.com/watch?v=n463QJ4cjsU&t=4319s).  If you would like help setting up a VM that you can kernel debug from your Windows host, this video is my recommendation.
 # Protections
 
-Before we get into writing code to exploit lsass, we first need to understand what we're up against. Tackling [Credential Guard](https://learn.microsoft.com/en-us/windows/security/identity-protection/credential-guard/how-it-works) will be done in another project, for now I'm focusing on simply dealing with LSA Protection.  I do however highly recommend reading up on Credential Guard, and how it may impact you.
+Before we get into writing code to exploit lsass, we first need to understand what we're up against. Tackling [Credential Guard]([How Credential Guard works | Microsoft Learn](https://learn.microsoft.com/en-us/windows/security/identity-protection/credential-guard/how-it-works)) will be done in another project, for now I'm focusing on simply dealing with LSA Protection AND LSASS encryption.  I do however highly recommend reading up on Credential Guard, and how it may impact you.
 
 ## LSA Protection
 
@@ -19,7 +26,7 @@ Starting in Windows 8.1, LSA Protection (Process Protection Light) only allows t
 
 	LSA protection is a security feature that defends sensitive information like credentials from theft by blocking untrusted LSA code injection and process memory dumping. LSA protection runs in the background by isolating the LSA process in a container and preventing other processes, like malicious actors or apps, from accessing the feature. This isolation makes LSA protection a vital security feature, which is why it's enabled by default in Windows 11.
 
-[Configure added LSA protection | Microsoft Learn](https://learn.microsoft.com/en-us/windows-server/security/credentials-protection-and-management/configuring-additional-lsa-protection#lsa-and-credential-guard)'
+[Configure added LSA protection | Microsoft Learn](https://learn.microsoft.com/en-us/windows-server/security/credentials-protection-and-management/configuring-additional-lsa-protection#lsa-and-credential-guard)
 
 	In Windows 8.1, a new concept of protected service has been introduced to allow anti-malware user-mode services to be launched as a protected service. After the service is launched as protected, Windows uses code integrity to only allow trusted code to load into the protected service. Windows also protects these processes from code injection and other attacks from admin processes.
 [Protecting anti-malware services - Win32 apps | Microsoft Learn](https://learn.microsoft.com/en-us/windows/win32/services/protecting-anti-malware-services-#introduction)
@@ -37,8 +44,7 @@ When a process is run with PPL enabled however, this is no longer possible.
 ## LSA Protection Workaround
 
 
-The workaround to LSA protection is at the kernel level.  The `EPROOCESS` struct is an [opaque]([Windows Kernel Opaque Structures - Windows drivers | Microsoft Learn](https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/eprocess?redirectedfrom=MSDN))  
-kernel level structure, opaque meaning intentionally unavailable through traditional means to the user, responsible for telling Windows, among other things, whether or not this process is protected or not.
+The workaround to LSA protection is at the kernel level.  The `EPROOCESS` struct is an [opaque](https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/eprocess?redirectedfrom=MSDN) kernel level structure, opaque meaning intentionally unavailable through traditional means to the user, responsible for telling Windows, among other things, whether or not this process is protected or not.
 
 The WIndows kernel keeps a list of all the processes running on a machine in a double-linked list, which as I've come to learn are a common data structure in the Windows kernel and in Lsass.  This list is stored within a global kernel variable called `PsActiveProcessHead`, of type `LIST_ENTRY`
 
@@ -51,7 +57,7 @@ typedef struct _LIST_ENTRY {
 
 ```
 
-We can view active processes in Windgb which is going to walk through the `PsActiveProcessHead` we talked about above using the `!process` [command]([!process (WinDbg) - Windows drivers | Microsoft Learn](https://learn.microsoft.com/en-us/windows-hardware/drivers/debuggercmds/-process)).
+We can view active processes in Windgb which is going to walk through the `PsActiveProcessHead` we talked about above using the `!process` [command](https://learn.microsoft.com/en-us/windows-hardware/drivers/debuggercmds/-process).
 
 ```
 !process 0 0 (0 0 = display all processes, brief info)
@@ -77,13 +83,13 @@ dt nt!_EPROCESS [ADDRESS] (When you know the address of a strcut you can interpr
 
 ![[Pasted image 20250901185907.png]]
 
-Here we see the `EPROCESS` struct being pulled from `nt` or [`ntoskrnl`]([Is That Ntoskrnl.exe Malware? How To Identify And Remove Fakes](https://malwaretips.com/blogs/ntoskrnl-exe-what-is-ntoskrnl-exe-should-i-remove-it/)).  While Windbg shows us what we need and makes it easier once we're in our program, sometimes research is best done online through sites like [vergiliusproject.com]([Vergilius Project | _EPROCESS](https://www.vergiliusproject.com/kernels/x64/windows-11/21h2/_EPROCESS)) or sites similar that contain online databases of Windows structures.
+Here we see the `EPROCESS` struct being pulled from `nt` or [`ntoskrnl`](https://malwaretips.com/blogs/ntoskrnl-exe-what-is-ntoskrnl-exe-should-i-remove-it/).  While Windbg shows us what we need and makes it easier once we're in our program, sometimes research is best done online through sites like [vergiliusproject.com](https://www.vergiliusproject.com/kernels/x64/windows-11/21h2/_EPROCESS) or sites similar that contain online databases of Windows structures.
 
 
 ![[Pasted image 20250901190227.png]]
 
 
-Here we can see that its of type [`PS_PROTECTION`.]([Vergilius Project | _PS_PROTECTION](https://www.vergiliusproject.com/kernels/x64/windows-11/21h2/_PS_PROTECTION)) 
+Here we can see that its of type [`PS_PROTECTION`.](https://www.vergiliusproject.com/kernels/x64/windows-11/21h2/_PS_PROTECTION).
 
 `PS_PROTECTION` field explanations from: https://www.alex-ionescu.com/?p=146 and [Debugging Protected Processes | itm4n's blog](https://itm4n.github.io/debugging-protected-processes/)
 
@@ -132,14 +138,14 @@ Because they are responsible for so much, and are crucial to the operability of 
 
 [Signing a Driver - Windows drivers | Microsoft Learn](https://learn.microsoft.com/en-us/windows-hardware/drivers/develop/signing-a-driver)
 
-[`kdmapper`]([TheCruZ/kdmapper: KDMapper is a simple tool that exploits iqvw64e.sys Intel driver to manually map non-signed drivers in memory](https://github.com/TheCruZ/kdmapper)) is a tool that bypasses this constraint and allows you to map non-signed drivers in memory through a vulnerability in iqvw64e.sys.  With this tool we can load a kernel driver into memory without a signature, interact with it, and remove process protections on `lsass.exe`.
+[`kdmapper`](https://github.com/TheCruZ/kdmapper) is a tool that bypasses this constraint and allows you to map non-signed drivers in memory through a vulnerability in iqvw64e.sys.  With this tool we can load a kernel driver into memory without a signature, interact with it, and remove process protections on `lsass.exe`.
 
 # Writing a Kernel Driver
 
-When I was writing my first kernel driver I heavily relied on cazz's video, linked [here]([YOUR FIRST KERNEL DRIVER (FULL GUIDE)](https://www.youtube.com/watch?v=n463QJ4cjsU&t=4319s)).
+When I was writing my first kernel driver I heavily relied on cazz's video, linked [here](https://www.youtube.com/watch?v=n463QJ4cjsU&t=4319s).
 
 
-Using [`DeviceIOControl`]([DeviceIoControl function (ioapiset.h) - Win32 apps | Microsoft Learn](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-deviceiocontrol)) we can send data directly to our driver in kernelland, for our userland process.
+Using [`DeviceIOControl`](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-deviceiocontrol) we can send data directly to our driver in kernelland, for our userland process.
 
 We can specify a variety of different actions that we want our driver to take at different times by passing `IO Control Codes` or  IOCTLs.  This program has IOCTLs for the following:
 1. Attach
@@ -152,7 +158,7 @@ We can specify a variety of different actions that we want our driver to take at
 
 ## Attach
 
-To attach to a process we use [`PsLookupProcessByProcessId`]([PsLookupProcessByProcessId function (ntifs.h) - Windows drivers | Microsoft Learn](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-pslookupprocessbyprocessid)).  By supplying a PID which we can find in userland, we can recieve a pointer to that processes `EPROCESS` struct which we know will let us unprotect the process, and allows us to work within the bounds of that processes address space for the rest of program execution.
+To attach to a process we use [`PsLookupProcessByProcessId`](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-pslookupprocessbyprocessid).  By supplying a PID which we can find in userland, we can recieve a pointer to that processes `EPROCESS` struct which we know will let us unprotect the process, and allows us to work within the bounds of that processes address space for the rest of program execution.
 
 In C the `EPROCESS` struct is referred to as `PEPROCESS`.  Once we've recieved our `EPROCESS` pointer we can apply the known offset to the `Protection` struct of `0x87a` to find the `PROCESS_PROTECTION_INFO` struct holding our PPL values.
 
@@ -389,7 +395,7 @@ Finally we attach to the process and then unprotect it.
 
 ## GetRemoteProcessHandle
 
-Before getting a process handle we first need to find it.  This can be done many different ways, I chose to use `NtQuerySystemInformation` because its a little less overt then a common enumeration function like [`EnumProcesses`]([EnumProcesses function (psapi.h) - Win32 apps | Microsoft Learn](https://learn.microsoft.com/en-us/windows/win32/api/psapi/nf-psapi-enumprocesses)=)
+Before getting a process handle we first need to find it.  This can be done many different ways, I chose to use `NtQuerySystemInformation` because its a little less overt then a common enumeration function like [`EnumProcesses`](https://learn.microsoft.com/en-us/windows/win32/api/psapi/nf-psapi-enumprocesses).
 
 
 ```c
@@ -495,7 +501,7 @@ I know thats a lot, but just stay with me!
 
 `Lsasrv.dll` stores all of the credentials and keys in memory that we're looking for.  We need to find the base address of Lsasrv so that we have a basis to start searching for everything.  To do this we can examine the lsass process's Process Environment Block (PEB).
 
-Every process has a [PEB]([PEB: Where Magic Is Stored – Malware and Stuff](https://malwareandstuff.com/peb-where-magic-is-stored/)) stored in its usermode memory space that looks like this:
+Every process has a [PEB](https://malwareandstuff.com/peb-where-magic-is-stored/) stored in its usermode memory space that looks like this:
 
 ```
 dt nt!_PEB
@@ -906,7 +912,7 @@ After changing the context of your debugger, in my experience you do need to rel
 ```
 ![[Pasted image 20250902213502.png]]
 
-Now we should be able to search for the lsasrv module with the `lm` command which [lists modules]([lm (List Loaded Modules) - Windows drivers | Microsoft Learn](https://learn.microsoft.com/en-us/windows-hardware/drivers/debuggercmds/lm--list-loaded-modules-)) that are loaded in memory by a process.  We specify a specific module with the `m` flag.
+Now we should be able to search for the lsasrv module with the `lm` command which [lists modules](https://learn.microsoft.com/en-us/windows-hardware/drivers/debuggercmds/lm--list-loaded-modules-)that are loaded in memory by a process.  We specify a specific module with the `m` flag.
 
 ```
 lm m lsasrv
@@ -940,14 +946,14 @@ BYTE PTRN_WN11_22H2_LogonSessionList[]	= {0x45, 0x89, 0x37, 0x4c, 0x8b, 0xf7, 0x
 45 89 37 4c 8b f7 8b f3 45 85 c0 0f 84
 ```
 
-To search for any of the byte sequences above we use the `s` [command]([s (Search Memory) - Windows drivers | Microsoft Learn](https://learn.microsoft.com/en-us/windows-hardware/drivers/debuggercmds/s--search-memory-)) which searches for a byte sequence in memory.
+To search for any of the byte sequences above we use the `s` [command](https://learn.microsoft.com/en-us/windows-hardware/drivers/debuggercmds/s--search-memory-)which searches for a byte sequence in memory.
 
 ```
 s -b 00007ffd`bd8d0000 00007ffd`bda7e000 33 ff 41 89 37 4c 8b f3 45 85 c0 74
 ```
 ![[Pasted image 20250902214041.png]]
 
-And we get a hit!  Lets [unassemble]([u, ub, uu (Unassemble) - Windows drivers | Microsoft Learn](https://learn.microsoft.com/en-us/windows-hardware/drivers/debuggercmds/u--unassemble-)) this bit of memory and see what kind of instructions are taking place there.  This provides an assembly translation at an address of our choosing.
+And we get a hit!  Lets [unassemble](https://learn.microsoft.com/en-us/windows-hardware/drivers/debuggercmds/u--unassemble-) this bit of memory and see what kind of instructions are taking place there.  This provides an assembly translation at an address of our choosing.
 
 ```
 u 00007ffd`bd93e384
@@ -1388,7 +1394,7 @@ So to recount our steps so far:
 
 ## Finding Encryption Keys
 
-Mimikatz has two types of encryption for their security blobs, AES and DES. Adam Chester's [article]([Exploring Mimikatz - Part 1 - WDigest - XPN InfoSec Blog](https://blog.xpnsec.com/exploring-mimikatz-part-1/)) and [code]([wdigest_extract_dllversion.c](https://gist.github.com/xpn/12a6907a2fce97296428221b3bd3b394)) explains the reverse engineering process he used to make this discovery extremely well.  In order to decrypt the security blob we need to find the AES, DES, and IV keys.  In order to find these keys we need to find the `KIWI_HARD_KEY` for both AES and DES.
+Mimikatz has two types of encryption for their security blobs, AES and DES. Adam Chester's [article](https://blog.xpnsec.com/exploring-mimikatz-part-1/) and [code](https://gist.github.com/xpn/12a6907a2fce97296428221b3bd3b394) explains the reverse engineering process he used to make this discovery extremely well.  In order to decrypt the security blob we need to find the AES, DES, and IV keys.  In order to find these keys we need to find the `KIWI_HARD_KEY` for both AES and DES.
 
 ```c
 typedef struct _KIWI_HARD_KEY {
@@ -1466,7 +1472,7 @@ The blue box represents the address in memory that our pattern searching functio
 
 The pattern search address simply provides a reliable place within close range of both our handles, that we can then apply another offset to.
 
-[Mimkatz File]([mimikatz/mimikatz/modules/sekurlsa/crypto/kuhl_m_sekurlsa_nt6.c at 152b208916c27d7d1fc32d10e64879721c4d06af · gentilkiwi/mimikatz](https://github.com/gentilkiwi/mimikatz/blob/152b208916c27d7d1fc32d10e64879721c4d06af/mimikatz/modules/sekurlsa/crypto/kuhl_m_sekurlsa_nt6.c#L9)
+[Mimkatz File](https://github.com/gentilkiwi/mimikatz/blob/152b208916c27d7d1fc32d10e64879721c4d06af/mimikatz/modules/sekurlsa/crypto/kuhl_m_sekurlsa_nt6.c#L9)
 ![[Pasted image 20250903212639.png]]
 These are build specific, just like the pattern bytes.  One hugely important misunderstanding I had when working through this is that **the offset listed above, takes you to a relative offset to the key.  This does NOT take you to the key itself!**
 
@@ -1723,7 +1729,7 @@ Like we saw earlier, we know that BCrypt is the primary cryptograph driver of ls
 
 Here's what we know based on the decomplication of lsasrv.dll
 
-**[BCryptSetProperty]([BCryptSetProperty function (bcrypt.h) - Win32 apps | Microsoft Learn](https://learn.microsoft.com/en-us/windows/win32/api/bcrypt/nf-bcrypt-bcryptsetproperty)):**
+**[BCryptSetProperty](https://learn.microsoft.com/en-us/windows/win32/api/bcrypt/nf-bcrypt-bcryptsetproperty):**
 
 | Field                                                                                                                                     | AES               | 3DES              |
 | ----------------------------------------------------------------------------------------------------------------------------------------- | ----------------- | ----------------- |
@@ -1870,4 +1876,19 @@ For reference I do not have a password set on this machine.  Here you can see th
 
 ![[Pasted image 20250903224003.png]]
 
-So there you have it!  Pulling hashes and username from lsass!  Hopefully this was helpful!
+1. Create driver ✔️
+2. Load driver ✔️
+3. Unprotect lsass ✔️
+4. Get lsass process handle ✔️
+5. Find lsasrv.dll in lsass memory space ✔️
+6. Find `LogonSessionList` pattern match address in lsasrv.dll✔️
+7. Find AES/DES/IV Key pattern match address in lsasrv.dll ✔️
+8. 9. Extract AES / DES / IV Keys✔️
+9. Read through LogonSessionList for encrypted security blobs✔️
+10. Decrypt encrypted security blob✔️
+11. MONEY!✔️
+
+So there you have it!  Pulling hashes and username from lsass!  Hopefully this was helpful!  I've wanted to make something like this for a while!
+
+
+)
